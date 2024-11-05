@@ -12,6 +12,7 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import wandb
+from tqdm.auto import tqdm
 
 
 def main(args):
@@ -166,33 +167,42 @@ def custom_training_loop(
         total_loss = 0
         optimizer.zero_grad()
         
-        for step, batch in enumerate(train_dataloader):
-            # Move batch to device
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{args.num_train_epochs}")
+        for step, batch in enumerate(progress_bar):
+            # Add gradient scaling for mixed precision training
+            scaler = torch.amp.GradScaler("cuda")
+            
             batch = {k: v.to(device) for k, v in batch.items()}
 
-            # Forward pass with gradient checkpointing
+            # Modify the forward pass to use gradient scaling
             with torch.amp.autocast("cuda:0", enabled=True, dtype=torch.bfloat16):
                 outputs, loss = model(**batch)
                 loss = loss / args.gradient_accumulation_steps
             
-            # Backward pass
-            loss.backward()
+            # Scale loss and backward pass
+            scaler.scale(loss).backward()
             
             total_loss += loss.item()
             
-            # Update weights after accumulating gradients
             if (step + 1) % args.gradient_accumulation_steps == 0:
-                # Clip gradients
+                # Clip gradients with scaled gradients
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 
-                optimizer.step()
+                # Step with scaler
+                scaler.step(optimizer)
+                scaler.update()
                 scheduler.step()
                 optimizer.zero_grad()
                 
-                # Log metrics asynchronously
+                # Add gradient norm logging
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'))
+                
+                # Update logging to include gradient norm
                 wandb.log({
                     "train/loss": total_loss,
                     "train/learning_rate": scheduler.get_last_lr()[0],
+                    "train/gradient_norm": grad_norm.item(),
                     "train/epoch": epoch + (step / len(train_dataloader)),
                     "train/global_step": global_step,
                 }, step=global_step)
@@ -202,12 +212,15 @@ def custom_training_loop(
                       f"Loss: {total_loss:.4f}")
                 total_loss = 0
                 global_step += 1
+                
+                # Update progress bar description with loss
+                progress_bar.set_postfix(loss=f"{total_loss:.4f}")
         
-        # Validation
-        model.eval()
+        # Validation loop
+        val_progress = tqdm(val_dataloader, desc=f"Validation epoch {epoch+1}")
         val_loss = 0
         with torch.no_grad():
-            for batch in val_dataloader:
+            for batch in val_progress:
                 batch = {k: v.to(device) for k, v in batch.items()}
                 outputs = model(**batch)
                 val_loss += outputs.loss.item()
@@ -236,7 +249,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument("--warmup_ratio", type=float, default=0.02)
     parser.add_argument("--weight_decay", type=float, default=0.01)
-    parser.add_argument("--max_grad_norm", type=float, default=1.0)
+    parser.add_argument("--max_grad_norm", type=float, default=5.0)
     parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--optim", type=str, default="paged_adamw_32bit")
 
@@ -252,8 +265,8 @@ if __name__ == "__main__":
     parser.add_argument("--initializer_range", type=float, default=0.02)
     parser.add_argument("--rms_norm_eps", type=float, default=1e-6)
     parser.add_argument("--input_layernorm", type=bool, default=True)
-    parser.add_argument("--post_attention_layernorm", type=bool, default=True)
-    parser.add_argument("--pre_ffnn_layernorm", type=bool, default=False)
+    parser.add_argument("--post_attention_layernorm", type=bool, default=False)
+    parser.add_argument("--pre_ffnn_layernorm", type=bool, default=True)
     parser.add_argument("--post_ffnn_layernorm", type=bool, default=False)
     parser.add_argument("--use_cache", type=bool, default=True)
     parser.add_argument("--tie_word_embeddings", type=bool, default=False)
