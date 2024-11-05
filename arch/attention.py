@@ -19,8 +19,14 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    # Reshape cos and sin to match head dimension
+    head_dim = q.shape[-1]
+    cos = cos[..., :head_dim]
+    sin = sin[..., :head_dim]
+    
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
+    
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
@@ -31,6 +37,7 @@ class Attention(nn.Module):
         self.config = config
         self.hidden_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         kv_size = self.head_dim * config.num_key_value_heads
@@ -58,10 +65,10 @@ class Attention(nn.Module):
         value = value.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query, key = apply_rotary_pos_emb(query, key, cos, sin)
         
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        key = repeat_kv(key, self.num_key_value_groups)
+        value = repeat_kv(value, self.num_key_value_groups)
 
         attn_weights = torch.matmul(query, key.transpose(-2, -1)) * self.scale
 
@@ -69,16 +76,20 @@ class Attention(nn.Module):
             attn_weights = attn_weights.clamp(min=-self.config.attention_cap, max=self.config.attention_cap)
 
         if mask is not None:
+            # Expand mask for attention heads dimension
+            mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
             attn_weights = attn_weights.masked_fill(mask == 0, -1e9)
         else:
-            mask = torch.ones(bsz, q_len, q_len).to(X.device).triu(1)
-            attn_weights = attn_weights.masked_fill(mask == 0, -1e9)
+            # Create causal mask and expand for attention heads
+            causal_mask = torch.ones(bsz, q_len, q_len).to(X.device).triu(1)
+            causal_mask = causal_mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
+            attn_weights = attn_weights.masked_fill(causal_mask == 0, -1e9)
 
         attn_weights = F.softmax(attn_weights, dim=-1)
         attn_weights = self.dropout(attn_weights)
         context = torch.matmul(attn_weights, value)
         context = context.transpose(1, 2).contiguous()
-        attn_output = self.o(attn_output)
+        attn_output = self.o(context.view(bsz, q_len, -1))
 
         return attn_output, attn_weights
 

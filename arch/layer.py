@@ -40,12 +40,12 @@ class Layer(nn.Module):
         if self.config.input_layernorm:
             X = self.input_layernorm(X)
 
-        X = self.attention(X, position_embeddings, mask)
+        X, _ = self.attention(X, position_embeddings, mask)
 
         if self.config.post_attention_layernorm:
             X = self.input_layernorm(X)
         
-        residual = residual + X * self.residual_multiplier
+        residual = residual + X * self.config.residual_multiplier
 
         if self.config.pre_ffnn_layernorm:
             residual = self.input_layernorm(residual)
@@ -55,6 +55,6 @@ class Layer(nn.Module):
         if self.config.post_ffnn_layernorm:
             X = self.input_layernorm(X)
         
-        residual = residual + X * self.residual_multiplier
+        residual = residual + X * self.config.residual_multiplier
 
         return residual

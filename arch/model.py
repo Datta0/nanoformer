@@ -46,33 +46,33 @@ class NanoFormer(nn.Module):
         self.rotary_emb = RotaryEmbedding(config.hidden_size)
         self.layers = nn.ModuleList([Layer(config, i) for i in range(self.num_layers)])
 
-    def forward(self, X, mask=None):
+    def forward(self, input_ids, attention_mask=None, position_ids=None, mask=None):
         if self.gradient_checkpointing and self.training:
             def create_custom_forward(module):
                 def custom_forward(*inputs):
                     return module(*inputs)
                 return custom_forward
 
-            X = self.embed_tokens(X)
+            input_ids = self.embed_tokens(input_ids)
             if position_ids is None:
-                position_ids = torch.arange(X.size(1), device=X.device).unsqueeze(0).expand(X.size(0), -1)
-            position_embeddings = self.rotary_emb(X, position_ids)
+                position_ids = torch.arange(input_ids.size(1), device=input_ids.device).unsqueeze(0).expand(input_ids.size(0), -1)
+            position_embeddings = self.rotary_emb(input_ids, position_ids)
             
             for layer in self.layers:
-                X = torch.utils.checkpoint.checkpoint(
+                input_ids = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(layer),
-                    X, position_embeddings, mask
+                    input_ids, position_embeddings, mask
                 )
-            X = self.norm(X)
-            return X
+            input_ids = self.norm(input_ids)
+            return input_ids
         else:
             if position_ids is None:
-                position_ids = torch.arange(X.size(1), device=X.device).unsqueeze(0).expand(X.size(0), -1)
-            position_embeddings = self.rotary_emb(X, position_ids)
+                position_ids = torch.arange(input_ids.size(1), device=input_ids.device).unsqueeze(0).expand(input_ids.size(0), -1)
+            position_embeddings = self.rotary_emb(input_ids, position_ids)
             for layer in self.layers:
-                X = layer(X, position_embeddings, mask)
-            X = self.norm(X)
-            return X
+                input_ids = layer(input_ids, position_embeddings, mask)
+            input_ids = self.norm(input_ids)
+            return input_ids
 
     def gradient_checkpointing_enable(self, value=True):
         self.gradient_checkpointing = value
@@ -83,9 +83,9 @@ class NanoFormerForCausalLM(NanoFormer):
         self.model = NanoFormer(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-    def forward(self, X, return_loss = False):
-        X = self.model(X)
-        logits = self.lm_head(X)
+    def forward(self, input_ids, attention_mask, return_loss = True):
+        hidden_states = self.model(input_ids, attention_mask)
+        logits = self.lm_head(hidden_states)
         if self.config.logit_cap:
             logits = torch.clamp(logits, -self.config.logit_cap, self.config.logit_cap)
         
@@ -93,8 +93,16 @@ class NanoFormerForCausalLM(NanoFormer):
         if return_loss:
             logits = logits.float()
             shift_logits = logits[..., :-1, :].contiguous()
-            labels = logits[..., 1:, :].contiguous()
+            shift_labels = input_ids[..., 1:].contiguous()
             loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), labels.view(-1))
+            loss = loss_fct(
+                shift_logits.reshape(-1, shift_logits.size(-1)),
+                shift_labels.reshape(-1)
+            )
 
-        return logits,loss
+        return logits, loss
+    
+    def set_train(self,):
+        self.model.train()
+        self.model.gradient_checkpointing_enable(True)
+        self.lm_head.train()

@@ -13,11 +13,19 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
 
-def main(config: Config, args):
+def main(args):
 
     dataset = load_dataset(args.dataset)
     train_data, val_data = dataset["train"], dataset["test"]
     print(train_data, val_data)
+
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    tokenizer.pad_token = tokenizer.eos_token
+
+    args.vocab_size = tokenizer.vocab_size
+    config = Config(**vars(args))
+    config.vocab_size = tokenizer.vocab_size
+    print(f'Setting vocab size to {tokenizer.vocab_size} from GPT2 tokenizer')
 
     model = NanoFormerForCausalLM(config)
     model.train()
@@ -41,14 +49,12 @@ def main(config: Config, args):
         report_to="wandb",
     )
 
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    tokenizer.pad_token = tokenizer.eos_token
 
     train_dataloader, val_dataloader = create_dataloaders(
         dataset,
         tokenizer,
         args.batch_size,
-        args.max_length,
+        args.max_position_embeddings,
     )
     
     custom_training_loop(
@@ -60,39 +66,62 @@ def main(config: Config, args):
 
 
 def tokenize_function(examples, tokenizer, max_length):
-    return tokenizer(examples["text"], max_length=max_length, truncation=True, padding="max_length", return_tensors="pt")
+    # Tokenize without padding first
+    tokenized = tokenizer(
+        examples["text"], 
+        max_length=max_length, 
+        truncation=True,
+        padding=False,  # Don't pad yet
+        return_tensors=None  # Return lists instead of tensors
+    )
+    return tokenized  # Return without padding
 
-def create_dataloaders(dataset, tokenizer, batch_size, max_length, num_workers=4):
-    # Create partial function for tokenization
+def create_dataloaders(dataset, tokenizer, batch_size, max_length, num_workers=1):
     tokenize = partial(tokenize_function, tokenizer=tokenizer, max_length=max_length)
     
-    # Map tokenization to datasets without thread pool (dataset.map handles parallelization)
     train_dataset = dataset["train"].map(
         tokenize,
         batched=True,
-        num_proc=num_workers,  # Remove fn_kwargs and pass num_proc directly
-        remove_columns=dataset["train"].column_names
+        num_proc=num_workers,
+        remove_columns=dataset["train"].column_names,
     )
     val_dataset = dataset["test"].map(
         tokenize,
         batched=True,
-        num_proc=num_workers,  # Remove fn_kwargs and pass num_proc directly
+        num_proc=num_workers,
         remove_columns=dataset["test"].column_names
     )
+    
+    def collate_fn(batch):
+        # Find max length in batch
+        max_len = max(len(x['input_ids']) for x in batch)
+        # Round up to nearest multiple of 8
+        max_len = ((max_len + 7) // 8) * 8
+        max_len = min(max_len, max_length)
+        
+        # Pad each sequence to max_len
+        padded_batch = tokenizer.pad(
+            {'input_ids': [x['input_ids'] for x in batch],
+             'attention_mask': [x['attention_mask'] for x in batch]},
+            padding='max_length',
+            max_length=max_len,
+            return_tensors='pt'
+        )
+        return padded_batch
     
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
         pin_memory=True,
+        collate_fn=collate_fn  # Add custom collate function
     )
     val_dataloader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
         pin_memory=True,
+        collate_fn=collate_fn  # Add custom collate function
     )
     return train_dataloader, val_dataloader
 
@@ -122,18 +151,19 @@ def custom_training_loop(
     
     # Training loop
     model.train()
+    model.set_train()
     for epoch in range(args.num_train_epochs):
         total_loss = 0
         optimizer.zero_grad()
         
         for step, batch in enumerate(train_dataloader):
             # Move batch to device
-            batch = {k: v[0].to(device) for k, v in batch.items()}
-            
+            batch = {k: v.to(device) for k, v in batch.items()}
+
             # Forward pass with gradient checkpointing
-            with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
-                outputs = model(**batch)
-                loss = outputs.loss / args.gradient_accumulation_steps
+            with torch.amp.autocast("cuda:0", enabled=True, dtype=torch.bfloat16):
+                outputs, loss = model(**batch)
+                loss = loss / args.gradient_accumulation_steps
             
             # Backward pass
             loss.backward()
@@ -175,7 +205,6 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="imdatta0/wikipedia_en_sample")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
-    parser.add_argument("--max_length", type=int, default=4096)
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument("--warmup_ratio", type=float, default=0.02)
     parser.add_argument("--weight_decay", type=float, default=0.01)
@@ -185,12 +214,11 @@ if __name__ == "__main__":
 
 
     # add everything in Config as argument
-    parser.add_argument("--vocab_size", type=int, default=10000)
-    parser.add_argument("--hidden_dim", type=int, default=128)
-    parser.add_argument("--intermediate_size", type=int, default=512)
-    parser.add_argument("--num_hidden_layers", type=int, default=6)
+    parser.add_argument("--hidden_dim", type=int, default=512)
+    parser.add_argument("--intermediate_size", type=int, default=2048)
+    parser.add_argument("--num_hidden_layers", type=int, default=12)
     parser.add_argument("--num_attention_heads", type=int, default=8)
-    parser.add_argument("--num_key_value_heads", type=int, default=8)
+    parser.add_argument("--num_key_value_heads", type=int, default=2)
     parser.add_argument("--hidden_act", type=str, default="silu")
     parser.add_argument("--max_position_embeddings", type=int, default=2048)
     parser.add_argument("--initializer_range", type=float, default=0.02)
@@ -215,6 +243,4 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
 
-    # create config from args
-    config = Config(**vars(args))
-    main(config, args)
+    main(args)
