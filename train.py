@@ -11,6 +11,7 @@ from transformers import get_linear_schedule_with_warmup
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+import wandb
 
 
 def main(args):
@@ -132,6 +133,13 @@ def custom_training_loop(
     args,
     device="cuda:0",
 ):
+    # Initialize wandb
+    wandb.init(
+        project="nanoformer",  # You can customize this
+        name=f'{args.attention_type}_ep{args.num_train_epochs}_bs{args.batch_size}_lr{args.lr}_norm{args.max_grad_norm}',
+        config=vars(args)
+    )
+    
     # Enable gradient checkpointing
     model.gradient_checkpointing_enable()
     
@@ -152,6 +160,8 @@ def custom_training_loop(
     # Training loop
     model.train()
     model.set_train()
+    global_step = 0
+    
     for epoch in range(args.num_train_epochs):
         total_loss = 0
         optimizer.zero_grad()
@@ -179,10 +189,19 @@ def custom_training_loop(
                 scheduler.step()
                 optimizer.zero_grad()
                 
+                # Log metrics asynchronously
+                wandb.log({
+                    "train/loss": total_loss,
+                    "train/learning_rate": scheduler.get_last_lr()[0],
+                    "train/epoch": epoch + (step / len(train_dataloader)),
+                    "train/global_step": global_step,
+                }, step=global_step)
+                
                 print(f"Epoch {epoch+1}/{args.num_train_epochs} | "
                       f"Step {step+1}/{len(train_dataloader)} | "
                       f"Loss: {total_loss:.4f}")
                 total_loss = 0
+                global_step += 1
         
         # Validation
         model.eval()
@@ -194,8 +213,17 @@ def custom_training_loop(
                 val_loss += outputs.loss.item()
         
         val_loss /= len(val_dataloader)
+        # Log validation metrics
+        wandb.log({
+            "val/loss": val_loss,
+            "val/epoch": epoch + 1,
+        }, step=global_step)
+        
         print(f"Epoch {epoch+1} validation loss: {val_loss:.4f}")
         model.train()
+    
+    # Close wandb run
+    wandb.finish()
 
 
 if __name__ == "__main__":
