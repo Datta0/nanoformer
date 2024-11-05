@@ -1,6 +1,8 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+import os
+import json
 
 from .config import Config
 from .layer import Layer, RMSNorm
@@ -83,6 +85,12 @@ class NanoFormerForCausalLM(NanoFormer):
         self.model = NanoFormer(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
+        # Tie word embeddings if config.tie_word_embeddings is True
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.embed_tokens.weight
+        
+        self.tie_word_embeddings = config.tie_word_embeddings
+
     def forward(self, input_ids, attention_mask, return_loss = True):
         hidden_states = self.model(input_ids, attention_mask)
         logits = self.lm_head(hidden_states)
@@ -106,3 +114,25 @@ class NanoFormerForCausalLM(NanoFormer):
         self.model.train()
         self.model.gradient_checkpointing_enable(True)
         self.lm_head.train()
+
+    def save_pretrained(self, save_directory):
+        """Save the model weights and configuration to a directory."""
+        os.makedirs(save_directory, exist_ok=True)
+        
+        # Detach tied weights temporarily if needed to avoid saving references
+        if self.config.tie_word_embeddings:
+            original_weight = self.lm_head.weight
+            self.lm_head.weight = nn.Parameter(self.embed_tokens.weight.clone())
+
+        # Save the model state dict
+        model_path = os.path.join(save_directory, "pytorch_model.bin")
+        torch.save(self.state_dict(), model_path)
+
+        # Re-tie the weights after saving
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = original_weight
+        
+        # Save the config
+        config_path = os.path.join(save_directory, "config.json")
+        with open(config_path, 'w') as f:
+            json.dump(self.config.__dict__, f, indent=2)

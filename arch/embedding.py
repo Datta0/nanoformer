@@ -21,7 +21,7 @@ class RotaryEmbedding(nn.Module):
         self.rope_kwargs = {}
         if config is None:
             print(
-                "`LlamaRotaryEmbedding` can now be fully parameterized by passing the model config through the "
+                "`RotaryEmbedding` can now be fully parameterized by passing the model config through the "
                 "`config` argument. All other arguments will be removed in v4.46"
             )
             self.rope_kwargs = {

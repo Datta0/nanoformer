@@ -7,3 +7,6 @@
 # pytest cache
 *__pycache__
 *.pytest_cache
+
+#wandb
+wandb
