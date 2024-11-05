@@ -34,7 +34,7 @@ class PreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 class NanoFormer(nn.Module):
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, gradient_checkpointing=False):
         super(NanoFormer, self).__init__()
         self.config = config
         self.gradient_checkpointing = False
@@ -47,6 +47,7 @@ class NanoFormer(nn.Module):
         self.norm = RMSNorm(config.hidden_size)
         self.rotary_emb = RotaryEmbedding(config.hidden_size)
         self.layers = nn.ModuleList([Layer(config, i) for i in range(self.num_layers)])
+        self.gradient_checkpointing = gradient_checkpointing
 
     def forward(self, input_ids, attention_mask=None, position_ids=None, mask=None):
         if self.gradient_checkpointing and self.training:
@@ -76,13 +77,11 @@ class NanoFormer(nn.Module):
             input_ids = self.norm(input_ids)
             return input_ids
 
-    def gradient_checkpointing_enable(self, value=True):
-        self.gradient_checkpointing = value
-
-class NanoFormerForCausalLM(NanoFormer):
+class NanoFormerForCausalLM(nn.Module):
     def __init__(self, config: Config):
-        super(NanoFormerForCausalLM, self).__init__(config)
-        self.model = NanoFormer(config)
+        super(NanoFormerForCausalLM, self).__init__()
+        self.config = config
+        self.model = NanoFormer(config, gradient_checkpointing=True)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # Tie word embeddings if config.tie_word_embeddings is True
@@ -110,10 +109,14 @@ class NanoFormerForCausalLM(NanoFormer):
 
         return logits, loss
     
+    def gradient_checkpointing_enable(self, value=True):
+        self.gradient_checkpointing = value
+    
     def set_train(self,):
         self.model.train()
-        self.model.gradient_checkpointing_enable(True)
+        self.gradient_checkpointing_enable(True)
         self.lm_head.train()
+        self.train()
 
     def save_pretrained(self, save_directory):
         """Save the model weights and configuration to a directory."""

@@ -199,8 +199,8 @@ def custom_training_loop(
         with torch.no_grad():
             for batch in val_progress:
                 batch = {k: v.to(device) for k, v in batch.items()}
-                outputs = model(**batch)
-                val_loss += outputs.loss.item()
+                _, loss = model(**batch)
+                val_loss += loss.item()
         
         val_loss /= len(val_dataloader)
         
