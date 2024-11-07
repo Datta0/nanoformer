@@ -98,7 +98,7 @@ def custom_training_loop(
     device="cuda:0",
 ):
     # Initialize wandb
-    run_name = f'{args.attention_type}_ep{args.num_train_epochs}_bs{args.batch_size}x{args.gradient_accumulation_steps}_lr{args.lr}_norm{args.max_grad_norm}'
+    run_name = f'{args.attention_type}_ep{args.num_epochs}_bs{args.batch_size}x{args.gradient_accumulation_steps}_lr{args.lr}_norm{args.max_grad_norm}'
     output_dir = f'/home/datta0/models/nanoformer/{run_name}'
     
     wandb.init(
@@ -118,7 +118,7 @@ def custom_training_loop(
     
     # Calculate total training steps
     num_update_steps_per_epoch = len(train_dataloader) // args.gradient_accumulation_steps
-    total_training_steps = num_update_steps_per_epoch * args.num_train_epochs
+    total_training_steps = num_update_steps_per_epoch * args.num_epochs
     
     # Create scheduler
     scheduler = get_linear_schedule_with_warmup(
@@ -132,11 +132,11 @@ def custom_training_loop(
     model.set_train()
     global_step = 0
     
-    for epoch in range(args.num_train_epochs):
+    for epoch in range(args.num_epochs):
         total_loss = 0
         optimizer.zero_grad()
         
-        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{args.num_train_epochs}")
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{args.num_epochs}")
         for step, batch in enumerate(progress_bar):
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             
@@ -168,7 +168,7 @@ def custom_training_loop(
                     "train/global_step": global_step,
                 }, step=global_step)
                 
-                print(f"Epoch {epoch+1}/{args.num_train_epochs} | "
+                print(f"Epoch {epoch+1}/{args.num_epochs} | "
                       f"Step {step+1}/{len(train_dataloader)} | "
                       f"Loss: {total_loss / args.gradient_accumulation_steps:.4f}")
                 total_loss = 0
@@ -266,7 +266,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="imdatta0/wikipedia_en_sample")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
-    parser.add_argument("--num_train_epochs", type=int, default=1)
+    parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--warmup_ratio", type=float, default=0.02)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--max_grad_norm", type=float, default=5.0)
