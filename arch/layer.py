@@ -4,24 +4,10 @@ from torch.nn import functional as F
 
 from .config import Config
 from .mlp import MLP
-from .attention import ATTN_TYPES
+from .attention import ATTN_TYPES, RMSNorm
 from .embedding import RotaryEmbedding
 
-class RMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
 
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
-
-    def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 class Layer(nn.Module):
     def __init__(self, config: Config, layer_idx: int):
@@ -31,7 +17,10 @@ class Layer(nn.Module):
         self.attention_type = config.attention_type
 
         self.input_layernorm = RMSNorm(self.config.hidden_size,)
-        self.attention = ATTN_TYPES[self.attention_type](config)
+        kwargs = {
+            "layer_idx": layer_idx
+        }
+        self.attention = ATTN_TYPES[self.attention_type](config, **kwargs)
         self.mlp = MLP(config)
 
     def forward(self, X, position_embeddings, mask=None):

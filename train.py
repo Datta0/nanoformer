@@ -17,12 +17,19 @@ import os
 import shutil
 
 def get_param_count(model):
-    total_count, grad_count = 0,0
+    total_count, grad_count = 0, 0
+    unique_params = set()  # Track unique parameters by their `id`
+    
     for _, param in model.named_parameters():
-        total_count += param.numel()
-        if param.requires_grad:
-            grad_count += param.numel()
+        # Check if this parameter is already counted
+        if id(param) not in unique_params:
+            unique_params.add(id(param))  # Mark this parameter as counted
+            total_count += param.numel()
+            if param.requires_grad:
+                grad_count += param.numel()
+                
     return total_count, grad_count
+
 
 def tokenize_function(examples, tokenizer, max_length):
     # Tokenize without padding first
@@ -98,14 +105,18 @@ def custom_training_loop(
     device="cuda:0",
 ):
     # Initialize wandb
-    run_name = f'{args.attention_type}_ep{args.num_epochs}_bs{args.batch_size}x{args.gradient_accumulation_steps}_lr{args.lr}_norm{args.max_grad_norm}'
+    if args.run_name is None:
+        run_name = f'{args.attention_type}_ep{args.num_epochs}_bs{args.batch_size}x{args.gradient_accumulation_steps}_lr{args.lr}_norm{args.max_grad_norm}'
+    else:
+        run_name = args.run_name
     output_dir = f'/home/datta0/models/nanoformer/{run_name}'
     
-    wandb.init(
-        project="nanoformer",
-        name=run_name,
-        config=vars(args)
-    )
+    if not args.no_wandb:
+        wandb.init(
+            project="nanoformer",
+            name=run_name,
+            config=vars(args)
+        )
     
     # Track best validation loss for saving best model
     best_val_loss = float('inf')
@@ -126,7 +137,10 @@ def custom_training_loop(
         num_warmup_steps=int(total_training_steps * args.warmup_ratio),
         num_training_steps=total_training_steps,
     )
-    # model = torch.compile(model)
+
+    if args.compile:
+        model = torch.compile(model)
+
     # Training loop
     model.train()
     model.set_train()
@@ -160,19 +174,23 @@ def custom_training_loop(
                 
                 # Logging
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'))
-                wandb.log({
-                    "train/loss": total_loss / args.gradient_accumulation_steps,  # Average loss over accumulation steps
-                    "train/learning_rate": scheduler.get_last_lr()[0],
-                    "train/gradient_norm": grad_norm.item(),
-                    "train/epoch": epoch + (step / len(train_dataloader)),
-                    "train/global_step": global_step,
-                }, step=global_step)
-                
+                if not args.no_wandb:
+                    wandb.log({
+                        "train/loss": total_loss / args.gradient_accumulation_steps,  # Average loss over accumulation steps
+                        "train/learning_rate": scheduler.get_last_lr()[0],
+                        "train/gradient_norm": grad_norm.item(),
+                        "train/epoch": epoch + (step / len(train_dataloader)),
+                        "train/global_step": global_step,
+                    }, step=global_step)
+                    
                 print(f"Epoch {epoch+1}/{args.num_epochs} | "
                       f"Step {step+1}/{len(train_dataloader)} | "
                       f"Loss: {total_loss / args.gradient_accumulation_steps:.4f}")
                 total_loss = 0
                 global_step += 1
+
+                # if args.tie_word_embeddings and not torch.allclose(model.lm_head.weight, model.model.embed_tokens.weight):
+                #     print(f'Unequal tied embeddings at step {(epoch,step)}')
                 
                 progress_bar.set_postfix(loss=f"{total_loss / args.gradient_accumulation_steps:.4f}")
         
@@ -193,6 +211,7 @@ def custom_training_loop(
                 if len(checkpoints) > 3:
                     shutil.rmtree(f"{output_dir}/{checkpoints[0]}")
             
+            
         # Validation loop
         val_progress = tqdm(val_dataloader, desc=f"Validation epoch {epoch+1}")
         val_loss = 0
@@ -211,11 +230,12 @@ def custom_training_loop(
             os.makedirs(best_model_dir, exist_ok=True)
             model.save_pretrained(best_model_dir)
         
-        # Log validation metrics
-        wandb.log({
-            "val/loss": val_loss,
-            "val/epoch": epoch + 1,
-        }, step=global_step)
+        if not args.no_wandb:
+            # Log validation metrics
+            wandb.log({
+                "val/loss": val_loss,
+                "val/epoch": epoch + 1,
+            }, step=global_step)
         
         print(f"Epoch {epoch+1} validation loss: {val_loss:.4f}")
         model.train()
@@ -273,6 +293,10 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=5e-4)
     # parser.add_argument("--optim", type=str, default="paged_adamw_32bit")
     parser.add_argument("--save_steps", type=int, default=100)
+    parser.add_argument("--run_name", type=str, default=None)
+    parser.add_argument("--no_wandb", action='store_true')
+    parser.add_argument("--compile", action='store_true')
+
 
 
     # add everything in Config as argument
@@ -290,7 +314,7 @@ if __name__ == "__main__":
     parser.add_argument("--pre_ffnn_layernorm", type=bool, default=True)
     parser.add_argument("--post_ffnn_layernorm", type=bool, default=False)
     parser.add_argument("--use_cache", type=bool, default=True)
-    parser.add_argument("--tie_word_embeddings", type=bool, default=False)
+    parser.add_argument("--tie_word_embeddings", action='store_true')
     parser.add_argument("--rope_theta", type=float, default=None)
     parser.add_argument("--rope_scaling", type=dict, default=None)
     parser.add_argument("--attention_dropout", type=float, default=0.0)

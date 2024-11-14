@@ -8,6 +8,7 @@ from .config import Config
 from .layer import Layer, RMSNorm
 from .embedding import RotaryEmbedding
 from transformers.modeling_utils import PreTrainedModel
+import torch.nn.utils.parametrize as parametrize
 
 
 class PreTrainedModel(PreTrainedModel):
@@ -86,7 +87,10 @@ class NanoFormerForCausalLM(nn.Module):
 
         # Tie word embeddings if config.tie_word_embeddings is True
         if config.tie_word_embeddings:
-            self.lm_head.weight = self.embed_tokens.weight
+            del self.lm_head.weight
+            self.lm_head.weight = self.model.embed_tokens.weight
+        
+        self.tie_word_embeddings = config.tie_word_embeddings
         
         self.tie_word_embeddings = config.tie_word_embeddings
 
@@ -125,7 +129,7 @@ class NanoFormerForCausalLM(nn.Module):
         # Detach tied weights temporarily if needed to avoid saving references
         if self.config.tie_word_embeddings:
             original_weight = self.lm_head.weight
-            self.lm_head.weight = nn.Parameter(self.embed_tokens.weight.clone())
+            self.lm_head.weight = nn.Parameter(self.model.embed_tokens.weight.clone())
 
         # Save the model state dict
         model_path = os.path.join(save_directory, "pytorch_model.bin")
