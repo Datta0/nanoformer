@@ -71,6 +71,8 @@ class Attention(nn.Module):
         kv_size = self.head_dim * config.num_key_value_heads
         q_size = self.head_dim * config.num_attention_heads
 
+        self.use_ngpt = config.use_ngpt
+
         self.dropout = nn.Dropout(config.attention_dropout)
         
         if config.attention_scale:
@@ -78,10 +80,17 @@ class Attention(nn.Module):
         else:
             self.scale = self.head_dim ** -0.5
 
-        self.q = nn.Linear(self.hidden_dim, q_size)
-        self.k = nn.Linear(self.hidden_dim, kv_size)
-        self.v = nn.Linear(self.hidden_dim, kv_size)
-        self.o = nn.Linear(self.hidden_dim, q_size)
+        self.q = nn.Linear(self.hidden_dim, q_size, bias=config.attn_bias)
+        self.k = nn.Linear(self.hidden_dim, kv_size, bias=config.attn_bias)
+        self.v = nn.Linear(self.hidden_dim, kv_size, bias=config.attn_bias)
+        self.o = nn.Linear(self.hidden_dim, q_size, bias=config.attn_bias)
+
+        if self.use_ngpt:
+            self.sqk_init_value = 1.0
+            self.sqk_init_scaling = self.hidden_dim ** -0.5 # by deafult 1/sqrt(head_dim) https://github.com/NVIDIA/ngpt/blob/ed19eb232380d41a9d71024b58d2403937d8f2c9/model.py#L188
+            self.sqk = nn.Parameter(self.sqk_init_scaling*torch.ones(self.hidden_dim, dtype=torch.float32)).view(1, self.num_heads, 1, self.head_dim)
+            self.scale = self.head_dim ** 0.5
+            self.normalize_weights()
 
     def forward(self, X, position_embeddings, mask=None):
 
@@ -95,6 +104,12 @@ class Attention(nn.Module):
         cos, sin = position_embeddings
         query, key = apply_rotary_pos_emb(query, key, cos, sin)
         
+        if self.use_ngpt:
+            # https://github.com/NVIDIA/ngpt/blob/ed19eb232380d41a9d71024b58d2403937d8f2c9/model.py#L129
+            sqk = self.sqk * (self.sqk_init_value/self.sqk_init_scaling)
+            query = sqk * F.normalize(query, dim=-1)
+            key = sqk * F.normalize(key, dim=-1)
+
         key = repeat_kv(key, self.num_key_value_groups)
         value = repeat_kv(value, self.num_key_value_groups)
 
@@ -120,6 +135,13 @@ class Attention(nn.Module):
         attn_output = self.o(context.view(bsz, q_len, -1))
 
         return attn_output, attn_weights
+    
+    def get_param_count(self,):
+        return sum(p.numel() for p in self.parameters())
+    
+    def normalize_weights(self):
+        for _, param in self.named_parameters():
+            param.data.copy_(F.normalize(param, dim=-1))
 
 
 class DiffAttention(nn.Module):
@@ -203,6 +225,9 @@ class DiffAttention(nn.Module):
         output = output.transpose(1, 2).reshape(bsz, q_len, -1).contiguous()
         output = self.o(output)
         return output, attn_weights
+    
+    def get_param_count(self,):
+        return sum(p.numel() for p in self.parameters())
 
 
 ATTN_TYPES = {

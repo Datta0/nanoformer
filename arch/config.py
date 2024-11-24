@@ -1,11 +1,11 @@
 class Config:
     def __init__(self,
         vocab_size,
-        hidden_size=4096,
-        intermediate_size=11008,
-        num_hidden_layers=32,
-        num_attention_heads=32,
-        num_key_value_heads=None,
+        hidden_size=1024,
+        intermediate_size=4096,
+        num_hidden_layers=8,
+        num_attention_heads=8,
+        num_key_value_heads=2,
         hidden_act="silu",
         max_position_embeddings=2048,
         initializer_range=0.02,
@@ -27,6 +27,8 @@ class Config:
         attention_cap=None,
         logit_cap=None,
         attention_type="gqa",
+        attn_bias=False,
+        mlp_bias=False,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -63,6 +65,14 @@ class Config:
         self.attention_multiplier = attention_multiplier
         self.attention_cap = attention_cap
         self.logit_cap = logit_cap
+
+        self.attn_bias = attn_bias
+        self.mlp_bias = mlp_bias
+
+        self.use_ngpt = attention_type == "ngpt"
+        if self.use_ngpt:
+            if self.input_layernorm or self.post_attention_layernorm or self.pre_ffnn_layernorm or self.post_ffnn_layernorm:
+                raise ValueError("NGPT enabled. Should disable input_layernorm, post_attention_layernorm, pre_ffnn_layernorm, or post_ffnn_layernorm.")
 
         self.tie_word_embeddings = tie_word_embeddings
 

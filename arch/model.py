@@ -77,6 +77,13 @@ class NanoFormer(nn.Module):
                 input_ids = layer(input_ids, position_embeddings, mask)
             input_ids = self.norm(input_ids)
             return input_ids
+    
+    @torch.no_grad()
+    def normalize_weights(self):
+        for _, param in self.named_parameters():
+            if param.ndim > 1:
+                norm = param.norm(dim=-1, keepdim=True)
+                param.data.div_(norm + 1e-6)  # Add small epsilon for numerical stability
 
 class NanoFormerForCausalLM(nn.Module):
     def __init__(self, config: Config):
@@ -121,6 +128,16 @@ class NanoFormerForCausalLM(nn.Module):
         self.gradient_checkpointing_enable(True)
         self.lm_head.train()
         self.train()
+    
+    def get_param_count(self,):
+        return sum(p.numel() for p in self.parameters())
+    
+    @torch.no_grad()
+    def normalize_weights(self):
+        for _, param in self.named_parameters():
+            if param.ndim > 1:
+                norm = param.norm(dim=-1, keepdim=True)
+                param.data.div_(norm + 1e-6)  # Add small epsilon for numerical stability
 
     def save_pretrained(self, save_directory):
         """Save the model weights and configuration to a directory."""

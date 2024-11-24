@@ -171,6 +171,8 @@ def custom_training_loop(
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
+                if args.use_ngpt:
+                    model.normalize_weights()
                 
                 # Logging
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'))
@@ -300,7 +302,7 @@ if __name__ == "__main__":
 
 
     # add everything in Config as argument
-    parser.add_argument("--hidden_dim", type=int, default=256)
+    parser.add_argument("--hidden_size", type=int, default=256)
     parser.add_argument("--intermediate_size", type=int, default=1024)
     parser.add_argument("--num_hidden_layers", type=int, default=8)
     parser.add_argument("--num_attention_heads", type=int, default=8)
