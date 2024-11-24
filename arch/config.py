@@ -72,7 +72,9 @@ class Config:
         self.use_ngpt = attention_type == "ngpt"
         if self.use_ngpt:
             if self.input_layernorm or self.post_attention_layernorm or self.pre_ffnn_layernorm or self.post_ffnn_layernorm:
-                raise ValueError("NGPT enabled. Should disable input_layernorm, post_attention_layernorm, pre_ffnn_layernorm, or post_ffnn_layernorm.")
+                print("NGPT enabled. Disabling explicit norms like input_layernorm, post_attention_layernorm, pre_ffnn_layernorm, or post_ffnn_layernorm.")
+                self.input_layernorm = self.post_attention_layernorm = self.pre_ffnn_layernorm = self.post_ffnn_layernorm = False
+            self.attention_type = "gqa"
 
         self.tie_word_embeddings = tie_word_embeddings
 

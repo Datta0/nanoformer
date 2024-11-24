@@ -23,7 +23,7 @@ class MLP(nn.Module):
         if self.use_ngpt:
             self.suv_init_value = 1.0
             self.suv_init_scaling = 1.0
-            self.suv = torch.nn.Parameter(self.suv_init_scaling*torch.ones(self.hidden_dim, dtype=torch.float32))
+            self.suv = torch.nn.Parameter(self.suv_init_scaling*torch.ones(self.intermediate_size, dtype=torch.float32))
             self.scale = self.hidden_dim ** 0.5
 
 

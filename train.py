@@ -171,7 +171,7 @@ def custom_training_loop(
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
-                if args.use_ngpt:
+                if args.attention_type=="ngpt":
                     model.normalize_weights()
                 
                 # Logging

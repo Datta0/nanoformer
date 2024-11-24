@@ -88,7 +88,9 @@ class Attention(nn.Module):
         if self.use_ngpt:
             self.sqk_init_value = 1.0
             self.sqk_init_scaling = self.hidden_dim ** -0.5 # by deafult 1/sqrt(head_dim) https://github.com/NVIDIA/ngpt/blob/ed19eb232380d41a9d71024b58d2403937d8f2c9/model.py#L188
-            self.sqk = nn.Parameter(self.sqk_init_scaling*torch.ones(self.hidden_dim, dtype=torch.float32)).view(1, self.num_heads, 1, self.head_dim)
+            self.sqk = nn.Parameter(
+                self.sqk_init_scaling * torch.ones(1, self.num_heads, 1, self.head_dim, dtype=torch.float32)
+            )
             self.scale = self.head_dim ** 0.5
             self.normalize_weights()
 
@@ -103,6 +105,9 @@ class Attention(nn.Module):
 
         cos, sin = position_embeddings
         query, key = apply_rotary_pos_emb(query, key, cos, sin)
+
+        key = repeat_kv(key, self.num_key_value_groups)
+        value = repeat_kv(value, self.num_key_value_groups)
         
         if self.use_ngpt:
             # https://github.com/NVIDIA/ngpt/blob/ed19eb232380d41a9d71024b58d2403937d8f2c9/model.py#L129
@@ -110,8 +115,6 @@ class Attention(nn.Module):
             query = sqk * F.normalize(query, dim=-1)
             key = sqk * F.normalize(key, dim=-1)
 
-        key = repeat_kv(key, self.num_key_value_groups)
-        value = repeat_kv(value, self.num_key_value_groups)
 
         attn_weights = torch.matmul(query, key.transpose(-2, -1)) * self.scale
 

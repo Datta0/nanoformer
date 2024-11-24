@@ -24,15 +24,16 @@ class Layer(nn.Module):
         self.mlp = MLP(config)
 
         self.use_ngpt = config.use_ngpt
+        self.scale = self.config.hidden_size ** -0.5
 
         if self.use_ngpt:
             self.attn_alpha_init_value = 0.05
-            self.attn_alpha_init_scaling = config.base_scale
-            self.attn_alpha = torch.nn.Parameter(self.attn_alpha_init_scaling*torch.ones(self.config.hidden_dim))
+            self.attn_alpha_init_scaling = self.scale
+            self.attn_alpha = torch.nn.Parameter(self.attn_alpha_init_scaling*torch.ones(self.config.hidden_size))
 
             self.mlp_alpha_init_value = 0.05
-            self.mlp_alpha_init_scaling = config.base_scale
-            self.mlp_alpha = torch.nn.Parameter(self.mlp_alpha_init_scaling*torch.ones(self.config.hidden_dim))
+            self.mlp_alpha_init_scaling = self.scale
+            self.mlp_alpha = torch.nn.Parameter(self.mlp_alpha_init_scaling*torch.ones(self.config.hidden_size))
 
     def forward(self, X, position_embeddings, mask=None):
         residual = X

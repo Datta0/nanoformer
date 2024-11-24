@@ -40,7 +40,7 @@ python train.py \
 ## TODO
 
 - [x] Implement [Differential Transformer](https://datta0.substack.com/i/150138108/differential-transformer)
-- [ ] Implement [nGPT](https://arxiv.org/abs/2410.01131)
+- [x] Implement [nGPT](https://arxiv.org/abs/2410.01131)
 - [ ] Implement custom optimisers like [Shampoo](https://github.com/jettify/pytorch-optimizer/blob/master/torch_optimizer/shampoo.py), [SOAP](https://arxiv.org/abs/2409.11321) and whatnot
 - [ ] Add support for Sliding Window Attention
 - [ ] Modify configs to be closer to Chinchilla Optimal Ratios
