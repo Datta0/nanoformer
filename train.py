@@ -1,3 +1,4 @@
+from math import e
 import torch
 from datasets import load_dataset
 from argparse import ArgumentParser
@@ -245,6 +246,27 @@ def custom_training_loop(
     # Close wandb run
     wandb.finish()
 
+def count_tokens_in_dataset(dataset, tokenizer, max_len=4096, batch_size=1000, num_proc=16):
+    # Tokenize the dataset in batches and parallelize the process
+    dataset = dataset.map(
+        lambda x: {
+            "len": [
+                tokenizer(txt, max_length=max_len, truncation=True, padding='max_length', return_tensors='pt')['input_ids'].shape[1]
+                for txt in x['text']
+            ]
+        },
+        batched=True, batch_size=batch_size, num_proc=num_proc
+    )
+    if 'train' in dataset:
+        lens = dataset['train']["len"]
+    else:
+        lens = dataset["len"]
+    total_tokens = np.sum(lens)
+    avg_tokens = total_tokens / len(lens)
+    max_tokens = np.max(lens)
+    min_tokens = np.min(lens)
+    
+    return total_tokens, avg_tokens, max_tokens, min_tokens, lens
 
 def main(args):
     dataset = load_dataset(args.dataset)
@@ -262,7 +284,13 @@ def main(args):
     model = NanoFormerForCausalLM(config)
     print(f'model is {model}')
     total_params, trainable_params = get_param_count(model)
-    print(f'Total params: {total_params}, Trainable params: {trainable_params}')
+    print(f'Total params: {total_params} aka {total_params/1e6:.2f}M, Trainable params: {trainable_params}')
+
+    if args.estimate:
+        total_tokens, avg_tokens, max_tokens, min_tokens, lens = count_tokens_in_dataset(dataset, tokenizer)
+        print(f'Total tokens: {total_tokens} aka {total_tokens/1e6:.2f}M, Average tokens: {avg_tokens}, Max tokens: {max_tokens}, Min tokens: {min_tokens}')
+        return
+
     model = model.to(torch.bfloat16)
     model.train()
     model.to("cuda:0")
@@ -292,19 +320,20 @@ if __name__ == "__main__":
     parser.add_argument("--warmup_ratio", type=float, default=0.02)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--max_grad_norm", type=float, default=5.0)
-    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--lr", type=float, default=5e-3)
     # parser.add_argument("--optim", type=str, default="paged_adamw_32bit")
     parser.add_argument("--save_steps", type=int, default=100)
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--no_wandb", action='store_true')
     parser.add_argument("--compile", action='store_true')
+    parser.add_argument("--estimate", action='store_true')
 
 
 
     # add everything in Config as argument
-    parser.add_argument("--hidden_size", type=int, default=256)
-    parser.add_argument("--intermediate_size", type=int, default=1024)
-    parser.add_argument("--num_hidden_layers", type=int, default=8)
+    parser.add_argument("--hidden_size", type=int, default=512)
+    parser.add_argument("--intermediate_size", type=int, default=2048)
+    parser.add_argument("--num_hidden_layers", type=int, default=16)
     parser.add_argument("--num_attention_heads", type=int, default=8)
     parser.add_argument("--num_key_value_heads", type=int, default=2)
     parser.add_argument("--hidden_act", type=str, default="silu")

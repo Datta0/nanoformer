@@ -34,7 +34,22 @@ python train.py \
     --num_epochs 1 \
     --lr 5e-4 \
     --hidden_dim 256 \
+    --num_hidden_layers 8
+```
+
+To estimate the number of tokens in a dataset and the model's param count with given config:
+(will need to refactor this to not create the model for estimation)
+
+```bash
+python train.py \
+    --dataset "imdatta0/wikipedia_en_sample" \
+    --batch_size 8 \
+    --gradient_accumulation_steps 16 \
+    --num_epochs 1 \
+    --lr 5e-4 \
+    --hidden_dim 256 \
     --num_hidden_layers 8 \
+    --estimate
 ```
 
 ## TODO
