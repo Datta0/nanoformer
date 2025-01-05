@@ -20,6 +20,7 @@ class Layer(nn.Module):
         kwargs = {
             "layer_idx": layer_idx
         }
+        assert self.attention_type in ATTN_TYPES, f"Unknown attention type {self.attention_type}. Choose one of {list(ATTN_TYPES.keys())}"
         self.attention = ATTN_TYPES[self.attention_type](config, **kwargs)
         self.mlp = MLP(config)
 

@@ -232,8 +232,98 @@ class DiffAttention(nn.Module):
     def get_param_count(self,):
         return sum(p.numel() for p in self.parameters())
 
+class MultiLatentAttention(nn.Module):
+
+    def __init__(self, config: Config, **kwargs):
+        super().__init__()
+
+        self.config = config
+        self.hidden_dim = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads
+        self.rope_heads = config.rope_heads if hasattr(config, "rope_heads") else self.num_heads
+        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.rope_head_dim = config.rope_head_dim if hasattr(config, "rope_head_dim") else self.head_dim
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.scale = (self.head_dim + self.rope_head_dim) ** (-0.5)
+
+        self.kv_compressed = config.kv_compressed
+        self.q_compressed = config.q_compressed
+        
+        self.down_kv = nn.Linear(self.num_heads * self.head_dim, self.kv_compressed, bias=config.attn_bias)
+        self.up_k = nn.Linear(self.kv_compressed, self.num_key_value_heads * self.head_dim, bias=config.attn_bias)
+        self.up_v = nn.Linear(self.kv_compressed, self.num_key_value_heads * self.head_dim, bias=config.attn_bias)
+
+        self.down_q = nn.Linear(self.num_heads * self.head_dim, self.q_compressed, bias=config.attn_bias)
+        self.up_q = nn.Linear(self.q_compressed, self.hidden_dim, bias=config.attn_bias)
+        self.qr = nn.Linear(self.q_compressed, self.rope_head_dim * self.rope_heads, bias=config.attn_bias)
+        
+        self.kr = nn.Linear(self.num_heads * self.head_dim, self.rope_head_dim, bias=config.attn_bias)
+
+        self.o = nn.Linear(self.hidden_dim, self.hidden_dim, bias=config.attn_bias)
+
+        self.q_norm = RMSNorm(self.q_compressed, eps=config.rms_norm_eps)
+        self.k_norm = RMSNorm(self.kv_compressed, eps=config.rms_norm_eps)
+
+        self.dropout = nn.Dropout(config.attention_dropout)
+        
+    def forward(self, X, position_embeddings, mask=None):
+        bsz, q_len, _ = X.shape
+
+        cos, sin = position_embeddings
+
+        cq = self.down_q(X)
+        cq = self.q_norm(cq)
+
+        qc = self.up_q(cq)
+        qr = self.qr(cq)
+        qc = qc.view(bsz, q_len, self.num_heads, -1).transpose(1, 2)
+        qr = qr.view(bsz, q_len, self.rope_heads, self.rope_head_dim).transpose(1, 2)
+
+        ckv = self.down_kv(X)
+        ckv = self.k_norm(ckv)
+
+        kc = self.up_k(ckv)
+        kr = self.kr(X)
+
+        kc = kc.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        kr = kr.view(bsz, q_len, 1, self.rope_head_dim).transpose(1, 2)
+
+        kc = repeat_kv(kc, self.num_key_value_groups)
+        kr = repeat_kv(kr, self.num_heads)
+
+        qr, kr = apply_rotary_pos_emb(qr, kr, cos, sin)
+        query = torch.cat([qc, qr], dim=-1)
+        key = torch.cat([kc, kr], dim=-1)
+
+        value = self.up_v(ckv)
+        value = value.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value = repeat_kv(value, self.num_key_value_groups)
+
+        attn_weights = torch.matmul(query, key.transpose(-2, -1)) * self.scale
+
+        if mask is not None:
+            # Expand mask for attention heads dimension
+            mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
+            attn_weights = attn_weights.masked_fill(mask == 0, -1e9)
+        else:
+            # Create causal mask and expand for attention heads
+            causal_mask = torch.ones(bsz, q_len, q_len).to(X.device).triu(1)
+            causal_mask = causal_mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
+            attn_weights = attn_weights.masked_fill(causal_mask == 0, -1e9)
+
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        context = torch.matmul(attn_weights, value)
+        context = context.transpose(1, 2).contiguous()
+        attn_output = self.o(context.view(bsz, q_len, -1))
+
+        return attn_output, attn_weights
+
+
 
 ATTN_TYPES = {
     "gqa": Attention,
     "diff": DiffAttention,
+    "mla": MultiLatentAttention,
 }

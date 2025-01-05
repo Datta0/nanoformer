@@ -15,6 +15,7 @@ from functools import partial
 import wandb
 from tqdm.auto import tqdm
 import os
+import json
 import shutil
 
 def get_param_count(model):
@@ -277,7 +278,8 @@ def main(args):
     tokenizer.pad_token = tokenizer.eos_token
 
     args.vocab_size = tokenizer.vocab_size
-    config = Config(**vars(args))
+    extra_args = json.loads(args.extra_args)
+    config = Config(**vars(args), **extra_args)
     config.vocab_size = tokenizer.vocab_size
     print(f'Setting vocab size to {tokenizer.vocab_size} from tokenizer')
 
@@ -357,6 +359,9 @@ if __name__ == "__main__":
     parser.add_argument("--attention_cap", type=float, default=None)
     parser.add_argument("--logit_cap", type=float, default=None)
     parser.add_argument("--attention_type", type=str, default="gqa")
+
+    parser.add_argument("--extra_args", type=str, default="{}") # default to empty dict
+
 
     args = parser.parse_args()
 

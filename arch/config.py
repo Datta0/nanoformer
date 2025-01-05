@@ -1,3 +1,4 @@
+
 class Config:
     def __init__(self,
         vocab_size,
@@ -41,6 +42,8 @@ class Config:
         # for backward compatibility
         if num_key_value_heads is None:
             num_key_value_heads = num_attention_heads
+        else:
+            assert num_attention_heads % num_key_value_heads == 0, "num_attention_heads must be a multiple of num_key_value_heads"
         
         self.num_key_value_heads = num_key_value_heads
         self.hidden_act = hidden_act
@@ -75,6 +78,17 @@ class Config:
                 print("NGPT enabled. Disabling explicit norms like input_layernorm, post_attention_layernorm, pre_ffnn_layernorm, or post_ffnn_layernorm.")
                 self.input_layernorm = self.post_attention_layernorm = self.pre_ffnn_layernorm = self.post_ffnn_layernorm = False
             self.attention_type = "gqa"
+        
+        if attention_type == "mla":
+            if kwargs.get("rope_head_dim", None) is not None:
+                self.rope_head_dim = kwargs.get("rope_head_dim", None)
+            
+            assert "kv_compressed" in kwargs, "kv_compressed must be specified for MLA. Specify the same using --kv_compressed=<>"
+            assert "q_compressed" in kwargs, "q_compressed must be specified for MLA. Specify the same using --q_compressed=<>"
+            self.kv_compressed = kwargs.get("kv_compressed", None)
+            self.q_compressed = kwargs.get("q_compressed", None)
+            assert self.q_compressed // self.kv_compressed == self.num_attention_heads // self.num_key_value_heads, f"the ratio of q_compressed ({self.q_compressed}) to kv_compressed ({self.kv_compressed}) {self.q_compressed // self.kv_compressed} must be equal to the ratio of num_attention_heads ({self.num_attention_heads}) to num_key_value_heads ({self.num_key_value_heads}) {self.num_attention_heads // self.num_key_value_heads}" 
+
 
         self.tie_word_embeddings = tie_word_embeddings
 
