@@ -3,6 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 import os
 import json
+import glob
 
 from .config import Config
 from .layer import Layer, RMSNorm
@@ -43,14 +44,13 @@ class NanoFormer(nn.Module):
         self.vocab_size = config.vocab_size
         self.num_layers = config.num_hidden_layers
         self.hidden_size = config.hidden_size
-        
         self.embed_tokens = nn.Embedding(self.vocab_size, self.hidden_size)
         self.norm = RMSNorm(config.hidden_size)
         self.rotary_emb = RotaryEmbedding(config.hidden_size)
         self.layers = nn.ModuleList([Layer(config, i) for i in range(self.num_layers)])
         self.gradient_checkpointing = gradient_checkpointing
 
-    def forward(self, input_ids, attention_mask=None, position_ids=None, mask=None):
+    def forward(self, input_ids, attention_mask=None, position_ids=None, mask=None, **kwargs):
         if self.gradient_checkpointing and self.training:
             def create_custom_forward(module):
                 def custom_forward(*inputs):
@@ -70,6 +70,7 @@ class NanoFormer(nn.Module):
             input_ids = self.norm(input_ids)
             return input_ids
         else:
+            input_ids = self.embed_tokens(input_ids)
             if position_ids is None:
                 position_ids = torch.arange(input_ids.size(1), device=input_ids.device).unsqueeze(0).expand(input_ids.size(0), -1)
             position_embeddings = self.rotary_emb(input_ids, position_ids)
@@ -89,15 +90,13 @@ class NanoFormerForCausalLM(nn.Module):
     def __init__(self, config: Config):
         super(NanoFormerForCausalLM, self).__init__()
         self.config = config
-        self.model = NanoFormer(config, gradient_checkpointing=True)
+        self.model = NanoFormer(config, gradient_checkpointing=config.gradient_checkpointing)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # Tie word embeddings if config.tie_word_embeddings is True
         if config.tie_word_embeddings:
             del self.lm_head.weight
             self.lm_head.weight = self.model.embed_tokens.weight
-        
-        self.tie_word_embeddings = config.tie_word_embeddings
         
         self.tie_word_embeddings = config.tie_word_embeddings
 
@@ -160,3 +159,20 @@ class NanoFormerForCausalLM(nn.Module):
         config_path = os.path.join(save_directory, "config.json")
         with open(config_path, 'w') as f:
             json.dump(self.config.__dict__, f, indent=2)
+    
+    def load_from_checkpoint(self, checkpoint_path):
+        if not os.path.isdir(checkpoint_path):
+            raise OSError(f"Path {checkpoint_path} does not exist")
+        
+        # Find all checkpoint directories
+        checkpoint_dirs = glob.glob(os.path.join(checkpoint_path, 'checkpoint-*'))
+        if not checkpoint_dirs:
+            raise FileNotFoundError(f"No checkpoint directories found in {checkpoint_path}")
+        
+        # Among the checkpoint directories, find the one with the highest modification time
+        latest_checkpoint = max(checkpoint_dirs, key=os.path.getmtime)
+        print(f"Loading from the latest checkpoint: {latest_checkpoint}")
+        
+        # Load from the found path
+        state_dict = torch.load(os.path.join(latest_checkpoint, "pytorch_model.bin"))
+        self.load_state_dict(state_dict)

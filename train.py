@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import wandb
 from tqdm.auto import tqdm
-import os
+import os, gc
 import json
 import shutil
 
@@ -215,6 +215,7 @@ def custom_training_loop(
                 if len(checkpoints) > 3:
                     shutil.rmtree(f"{output_dir}/{checkpoints[0]}")
             
+            # torch.cuda.empty_cache()
             
         # Validation loop
         val_progress = tqdm(val_dataloader, desc=f"Validation epoch {epoch+1}")
@@ -274,7 +275,7 @@ def main(args):
     train_data, val_data = dataset["train"], dataset["test"]
     print(train_data, val_data)
 
-    tokenizer = AutoTokenizer.from_pretrained("imdatta0/nanoformer")
+    tokenizer = AutoTokenizer.from_pretrained("NeelNanda/gpt-neox-tokenizer-digits")
     tokenizer.pad_token = tokenizer.eos_token
 
     args.vocab_size = tokenizer.vocab_size
@@ -287,6 +288,9 @@ def main(args):
     print(f'model is {model}')
     total_params, trainable_params = get_param_count(model)
     print(f'Total params: {total_params} aka {total_params/1e6:.2f}M, Trainable params: {trainable_params}')
+
+    if args.resume_from_checkpoint:
+        model.load_from_checkpoint(f'/home/datta0/models/nanoformer/{args.run_name}')
 
     if args.estimate:
         total_tokens, avg_tokens, max_tokens, min_tokens, lens = count_tokens_in_dataset(dataset, tokenizer)
@@ -315,7 +319,7 @@ if __name__ == "__main__":
 
     parser = ArgumentParser()
 
-    parser.add_argument("--dataset", type=str, default="imdatta0/wikipedia_en_sample")
+    parser.add_argument("--dataset", type=str, default="JeanKaddour/minipile")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=512)
     parser.add_argument("--num_epochs", type=int, default=1)
@@ -329,11 +333,12 @@ if __name__ == "__main__":
     parser.add_argument("--no_wandb", action='store_true')
     parser.add_argument("--compile", action='store_true')
     parser.add_argument("--estimate", action='store_true')
+    parser.add_argument("--resume_from_checkpoint",action='store_true')
 
 
 
     # add everything in Config as argument
-    parser.add_argument("--hidden_size", type=int, default=512)
+    parser.add_argument("--hidden_size", type=int, default=1024)
     parser.add_argument("--intermediate_size", type=int, default=2048)
     parser.add_argument("--num_hidden_layers", type=int, default=16)
     parser.add_argument("--num_attention_heads", type=int, default=8)
@@ -358,7 +363,7 @@ if __name__ == "__main__":
     parser.add_argument("--attention_multiplier", type=float, default=1.0)
     parser.add_argument("--attention_cap", type=float, default=None)
     parser.add_argument("--logit_cap", type=float, default=None)
-    parser.add_argument("--attention_type", type=str, default="gqa")
+    parser.add_argument("--attention_type", type=str, default="gqa", choices=["gqa", "mla", "ngpt", "diff"])
 
     parser.add_argument("--extra_args", type=str, default="{}") # default to empty dict
 

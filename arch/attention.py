@@ -324,6 +324,7 @@ class MultiLatentAttention(nn.Module):
 
 ATTN_TYPES = {
     "gqa": Attention,
+    "gqa-ngpt": Attention,
     "diff": DiffAttention,
     "mla": MultiLatentAttention,
 }

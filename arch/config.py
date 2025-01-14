@@ -30,6 +30,7 @@ class Config:
         attention_type="gqa",
         attn_bias=False,
         mlp_bias=False,
+        gradient_checkpointing=True,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -72,12 +73,12 @@ class Config:
         self.attn_bias = attn_bias
         self.mlp_bias = mlp_bias
 
-        self.use_ngpt = attention_type == "ngpt"
+        self.use_ngpt = "ngpt" in attention_type
         if self.use_ngpt:
             if self.input_layernorm or self.post_attention_layernorm or self.pre_ffnn_layernorm or self.post_ffnn_layernorm:
                 print("NGPT enabled. Disabling explicit norms like input_layernorm, post_attention_layernorm, pre_ffnn_layernorm, or post_ffnn_layernorm.")
                 self.input_layernorm = self.post_attention_layernorm = self.pre_ffnn_layernorm = self.post_ffnn_layernorm = False
-            self.attention_type = "gqa"
+            self.attention_type = "gqa-ngpt" # For now we only have nGPT for GQA. We might experiment with normalising DiffTransformer, MLA later.
         
         if attention_type == "mla":
             if kwargs.get("rope_head_dim", None) is not None:
@@ -91,5 +92,6 @@ class Config:
 
 
         self.tie_word_embeddings = tie_word_embeddings
+        self.gradient_checkpointing = gradient_checkpointing
 
         
