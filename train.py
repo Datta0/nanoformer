@@ -53,11 +53,12 @@ def create_dataloaders(dataset, tokenizer, batch_size, max_length, num_workers=4
         num_proc=num_workers,
         remove_columns=dataset["train"].column_names,
     )
-    val_dataset = dataset["test"].map(
+    val_key = "val" if "val" in dataset else "validation" if "validation" in dataset else "test"
+    val_dataset = dataset[val_key].map(
         tokenize,
         batched=True,
         num_proc=num_workers,
-        remove_columns=dataset["test"].column_names
+        remove_columns=dataset[val_key].column_names
     )
     
     def collate_fn(batch):
@@ -103,6 +104,7 @@ def custom_training_loop(
     model,
     train_dataloader,
     val_dataloader,
+    resume_step,
     args,
     device="cuda:0",
 ):
@@ -146,14 +148,23 @@ def custom_training_loop(
     # Training loop
     model.train()
     model.set_train()
-    global_step = 0
-    
-    for epoch in range(args.num_epochs):
+    n = len(train_dataloader)
+    resume_epoch = resume_step//n
+    grad_steps = 0
+    step = resume_epoch*n
+
+    for epoch in range(resume_epoch,args.num_epochs):
         total_loss = 0
         optimizer.zero_grad()
         
         progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{args.num_epochs}")
-        for step, batch in enumerate(progress_bar):
+        for _, batch in enumerate(progress_bar):
+            step += 1
+            if step < resume_step:
+                # hacky way to skip a few steps for now. Should not cost a lot of time
+                if step % args.gradient_accumulation_steps == 0:
+                    grad_steps += 1
+                continue
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             
             # Forward pass with bfloat16 autocast
@@ -161,7 +172,9 @@ def custom_training_loop(
                 outputs, loss = model(**batch)
                 # Divide loss by gradient accumulation steps
                 loss = loss / args.gradient_accumulation_steps
-            
+                # calculate mean of the logits and use it for wandb
+                mean_logits = torch.mean(outputs)
+
             # Backward pass
             loss.backward()
             
@@ -184,23 +197,56 @@ def custom_training_loop(
                         "train/learning_rate": scheduler.get_last_lr()[0],
                         "train/gradient_norm": grad_norm.item(),
                         "train/epoch": epoch + (step / len(train_dataloader)),
-                        "train/global_step": global_step,
-                    }, step=global_step)
+                        "train/global_step": grad_steps,
+                        "train/mean_logits": mean_logits,
+                    }, step=grad_steps)
                     
                 print(f"Epoch {epoch+1}/{args.num_epochs} | "
                       f"Step {step+1}/{len(train_dataloader)} | "
                       f"Loss: {total_loss / args.gradient_accumulation_steps:.4f}")
                 total_loss = 0
-                global_step += 1
+                grad_steps += 1
 
                 # if args.tie_word_embeddings and not torch.allclose(model.lm_head.weight, model.model.embed_tokens.weight):
                 #     print(f'Unequal tied embeddings at step {(epoch,step)}')
                 
                 progress_bar.set_postfix(loss=f"{total_loss / args.gradient_accumulation_steps:.4f}")
+            
+            if val_dataloader and (step+1) % args.eval_steps == 0:
+                model.eval()
+                val_progress = tqdm(val_dataloader, desc=f"Validation step {step+1}")
+                val_loss = 0
+                val_logit_mean = 0
+                with torch.no_grad():
+                    for batch in val_progress:
+                        batch = {k: v.to(device) for k, v in batch.items()}
+                        outputs, loss = model(**batch)
+                        val_loss += loss.item()
+                        val_logit_mean += torch.mean(outputs)
+                
+                val_loss /= len(val_dataloader)
+                val_logit_mean /= len(val_dataloader)
+                
+                # Save best model
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_model_dir = f"{output_dir}/best_model"
+                    os.makedirs(best_model_dir, exist_ok=True)
+                    model.save_pretrained(best_model_dir)
+                
+                if not args.no_wandb:
+                    # Log validation metrics
+                    wandb.log({
+                        "val/loss": val_loss,
+                        "val/epoch": epoch + 1,
+                        "val/logit_mean": val_logit_mean,
+                    }, step=grad_steps)
+                
+                model.train()
         
             # Save checkpoint every save_steps
-            if global_step % args.save_steps == 0:
-                checkpoint_dir = f"{output_dir}/checkpoint-{global_step}"
+            if step % args.save_steps == 0:
+                checkpoint_dir = f"{output_dir}/checkpoint-{step}"
                 os.makedirs(checkpoint_dir, exist_ok=True)
                 
                 # Save model
@@ -214,36 +260,6 @@ def custom_training_loop(
                 
                 if len(checkpoints) > 3:
                     shutil.rmtree(f"{output_dir}/{checkpoints[0]}")
-            
-            # torch.cuda.empty_cache()
-            
-        # Validation loop
-        val_progress = tqdm(val_dataloader, desc=f"Validation epoch {epoch+1}")
-        val_loss = 0
-        with torch.no_grad():
-            for batch in val_progress:
-                batch = {k: v.to(device) for k, v in batch.items()}
-                _, loss = model(**batch)
-                val_loss += loss.item()
-        
-        val_loss /= len(val_dataloader)
-        
-        # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_model_dir = f"{output_dir}/best_model"
-            os.makedirs(best_model_dir, exist_ok=True)
-            model.save_pretrained(best_model_dir)
-        
-        if not args.no_wandb:
-            # Log validation metrics
-            wandb.log({
-                "val/loss": val_loss,
-                "val/epoch": epoch + 1,
-            }, step=global_step)
-        
-        print(f"Epoch {epoch+1} validation loss: {val_loss:.4f}")
-        model.train()
     
     # Close wandb run
     wandb.finish()
@@ -271,6 +287,14 @@ def count_tokens_in_dataset(dataset, tokenizer, max_len=4096, batch_size=1000, n
     return total_tokens, avg_tokens, max_tokens, min_tokens, lens
 
 def main(args):
+    if args.save_steps < args.gradient_accumulation_steps:
+        print(f'Settings save_steps (currently {args.save_steps}) to be equal to gradient_accumulation_steps {args.gradient_accumulation_steps}')
+        args.save_steps = args.gradient_accumulation_steps
+    
+    if args.eval_steps < args.gradient_accumulation_steps:
+        print(f'Settings eval_steps (currently {args.eval_steps}) to be equal to gradient_accumulation_steps {args.gradient_accumulation_steps}')
+        args.eval_steps = args.gradient_accumulation_steps
+
     dataset = load_dataset(args.dataset)
     train_data, val_data = dataset["train"], dataset["test"]
     print(train_data, val_data)
@@ -290,7 +314,10 @@ def main(args):
     print(f'Total params: {total_params} aka {total_params/1e6:.2f}M, Trainable params: {trainable_params}')
 
     if args.resume_from_checkpoint:
-        model.load_from_checkpoint(f'/home/datta0/models/nanoformer/{args.run_name}')
+        resume_step = model.load_from_checkpoint(f'/home/datta0/models/nanoformer/{args.run_name}')
+    else:
+        resume_step = 0
+    print(f'Starting from step {resume_step}')
 
     if args.estimate:
         total_tokens, avg_tokens, max_tokens, min_tokens, lens = count_tokens_in_dataset(dataset, tokenizer)
@@ -312,6 +339,7 @@ def main(args):
         model,
         train_dataloader,
         val_dataloader,
+        resume_step,
         args,
     )
 
@@ -328,12 +356,13 @@ if __name__ == "__main__":
     parser.add_argument("--max_grad_norm", type=float, default=5.0)
     parser.add_argument("--lr", type=float, default=5e-3)
     # parser.add_argument("--optim", type=str, default="paged_adamw_32bit")
-    parser.add_argument("--save_steps", type=int, default=100)
+    parser.add_argument("--save_steps", type=int, default=512)
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--no_wandb", action='store_true')
     parser.add_argument("--compile", action='store_true')
     parser.add_argument("--estimate", action='store_true')
     parser.add_argument("--resume_from_checkpoint",action='store_true')
+    parser.add_argument("--eval_steps", type=int, default=2048)
 
 
 

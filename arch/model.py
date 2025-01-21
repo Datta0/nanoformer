@@ -176,3 +176,8 @@ class NanoFormerForCausalLM(nn.Module):
         # Load from the found path
         state_dict = torch.load(os.path.join(latest_checkpoint, "pytorch_model.bin"))
         self.load_state_dict(state_dict)
+
+        # if selected folder is checkpoint-x return the value of x
+        step = latest_checkpoint.split('/')[-1].split('-')[-1]
+        if step.isdigit():
+            return int(step)
