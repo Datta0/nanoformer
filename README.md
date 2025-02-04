@@ -1,6 +1,12 @@
 # NanoFormer
 
-NanoFormer is a lightweight transformer model implementation designed for efficient training and inference. It is a collection of transformer architectures (and a few variants) that can be easily experimented with
+NanoFormer is a lightweight transformer model implementation designed for efficient training and inference. It is a collection of transformer architectures (and a few variants) that can be easily experimented with.
+
+### Blog:
+[Here's the blog](https://datta0.github.io/posts/transformer-showdown/) comparing different architectures, their memory and KVCache requirements. Do give a read.
+Here's a sneak peak
+![Architecture Comparison](arch_comp.png)
+
 
 ## Features
 
