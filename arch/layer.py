@@ -36,13 +36,16 @@ class Layer(nn.Module):
             self.mlp_alpha_init_scaling = self.scale
             self.mlp_alpha = torch.nn.Parameter(self.mlp_alpha_init_scaling*torch.ones(self.config.hidden_size))
 
-    def forward(self, X, position_embeddings, mask=None):
+    def forward(self, X, position_embeddings, mask=None, return_attn_scores=False):
         residual = X
 
         if self.config.input_layernorm:
             X = self.input_layernorm(X)
 
-        X, _ = self.attention(X, position_embeddings, mask)
+        if return_attn_scores:
+            X, _, attn_scores = self.attention(X, position_embeddings, mask, return_attn_scores=True)
+        else:
+            X, _ = self.attention(X, position_embeddings, mask)
 
         if self.config.post_attention_layernorm:
             X = self.input_layernorm(X)
@@ -76,6 +79,8 @@ class Layer(nn.Module):
         else:
             residual = residual + X * self.config.residual_multiplier
 
+        if return_attn_scores:
+            return residual, attn_scores
         return residual
     
 

@@ -50,7 +50,8 @@ class NanoFormer(nn.Module):
         self.layers = nn.ModuleList([Layer(config, i) for i in range(self.num_layers)])
         self.gradient_checkpointing = gradient_checkpointing
 
-    def forward(self, input_ids, attention_mask=None, position_ids=None, mask=None, **kwargs):
+    def forward(self, input_ids, attention_mask=None, position_ids=None, mask=None, return_attn_scores=False, **kwargs):
+        attn_scores_all = [] if return_attn_scores else None
         if self.gradient_checkpointing and self.training:
             def create_custom_forward(module):
                 def custom_forward(*inputs):
@@ -61,13 +62,21 @@ class NanoFormer(nn.Module):
             if position_ids is None:
                 position_ids = torch.arange(input_ids.size(1), device=input_ids.device).unsqueeze(0).expand(input_ids.size(0), -1)
             position_embeddings = self.rotary_emb(input_ids, position_ids)
-            
             for layer in self.layers:
-                input_ids = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(layer),
-                    input_ids, position_embeddings, mask
-                )
+                if return_attn_scores:
+                    input_ids, attn_scores = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(layer),
+                        input_ids, position_embeddings, mask, True
+                    )
+                    attn_scores_all.append(attn_scores)
+                else:
+                    input_ids = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(layer),
+                        input_ids, position_embeddings, mask
+                    )
             input_ids = self.norm(input_ids)
+            if return_attn_scores:
+                return input_ids, attn_scores_all
             return input_ids
         else:
             input_ids = self.embed_tokens(input_ids)
@@ -75,8 +84,14 @@ class NanoFormer(nn.Module):
                 position_ids = torch.arange(input_ids.size(1), device=input_ids.device).unsqueeze(0).expand(input_ids.size(0), -1)
             position_embeddings = self.rotary_emb(input_ids, position_ids)
             for layer in self.layers:
-                input_ids = layer(input_ids, position_embeddings, mask)
+                if return_attn_scores:
+                    input_ids, attn_scores = layer(input_ids, position_embeddings, mask, True)
+                    attn_scores_all.append(attn_scores)
+                else:
+                    input_ids = layer(input_ids, position_embeddings, mask)
             input_ids = self.norm(input_ids)
+            if return_attn_scores:
+                return input_ids, attn_scores_all
             return input_ids
     
     @torch.no_grad()
@@ -100,12 +115,15 @@ class NanoFormerForCausalLM(nn.Module):
         
         self.tie_word_embeddings = config.tie_word_embeddings
 
-    def forward(self, input_ids, attention_mask, return_loss = True):
-        hidden_states = self.model(input_ids, attention_mask)
+    def forward(self, input_ids, attention_mask, return_loss = True, return_attn_scores=False):
+        if return_attn_scores:
+            hidden_states, attn_scores_all = self.model(input_ids, attention_mask, return_attn_scores=True)
+        else:
+            hidden_states = self.model(input_ids, attention_mask)
+            attn_scores_all = None
         logits = self.lm_head(hidden_states)
         if self.config.logit_cap:
             logits = torch.clamp(logits, -self.config.logit_cap, self.config.logit_cap)
-        
         loss = None
         if return_loss:
             logits = logits.float()
@@ -116,7 +134,8 @@ class NanoFormerForCausalLM(nn.Module):
                 shift_logits.reshape(-1, shift_logits.size(-1)),
                 shift_labels.reshape(-1)
             )
-
+        if return_attn_scores:
+            return logits, loss, attn_scores_all
         return logits, loss
     
     def gradient_checkpointing_enable(self, value=True):

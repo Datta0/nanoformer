@@ -17,6 +17,7 @@ from tqdm.auto import tqdm
 import os, gc
 import json
 import shutil
+import torch.nn.functional as F
 
 def get_param_count(model):
     total_count, grad_count = 0, 0
@@ -100,6 +101,20 @@ def create_dataloaders(dataset, tokenizer, batch_size, max_length, num_workers=4
     )
     return train_dataloader, val_dataloader
 
+def mse_head_sim_loss(attn_scores):
+    # attn_scores: (batch, num_heads, seq, seq)
+    # Compute MSE between each pair of heads
+    n_heads = attn_scores.shape[1]
+    loss = 0.0
+    count = 0
+    for i in range(n_heads):
+        for j in range(i+1, n_heads):
+            loss = loss + F.mse_loss(attn_scores[:, i], attn_scores[:, j])
+            count += 1
+    if count > 0:
+        loss = loss / count
+    return loss
+
 def custom_training_loop(
     model,
     train_dataloader,
@@ -169,11 +184,20 @@ def custom_training_loop(
             
             # Forward pass with bfloat16 autocast
             with torch.amp.autocast("cuda:0", enabled=True, dtype=torch.bfloat16):
-                outputs, loss = model(**batch)
-                # Divide loss by gradient accumulation steps
-                loss = loss / args.gradient_accumulation_steps
-                # calculate mean of the logits and use it for wandb
+                if args.head_sim_loss:
+                    outputs, bce_loss, attn_scores_all = model(**batch, return_attn_scores=True)
+                else:
+                    outputs, bce_loss = model(**batch)
+                    attn_scores_all = None
+                loss = bce_loss / args.gradient_accumulation_steps
                 mean_logits = torch.mean(outputs)
+                head_sim_loss_val = 0.0
+                if args.head_sim_loss and attn_scores_all is not None:
+                    for attn_scores in attn_scores_all:
+                        if attn_scores is not None:
+                            head_sim_loss_val = head_sim_loss_val + mse_head_sim_loss(attn_scores)
+                    head_sim_loss_val = head_sim_loss_val * args.head_sim_loss_weight
+                    loss = loss + head_sim_loss_val / args.gradient_accumulation_steps
 
             # Backward pass
             loss.backward()
@@ -192,18 +216,24 @@ def custom_training_loop(
                 # Logging
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'))
                 if not args.no_wandb:
-                    wandb.log({
+                    log_dict = {
                         "train/loss": total_loss / args.gradient_accumulation_steps,  # Average loss over accumulation steps
                         "train/learning_rate": scheduler.get_last_lr()[0],
                         "train/gradient_norm": grad_norm.item(),
                         "train/epoch": epoch + (step / len(train_dataloader)),
                         "train/global_step": grad_steps,
                         "train/mean_logits": mean_logits,
-                    }, step=grad_steps)
+                        "train/bce_loss": bce_loss.item() if hasattr(bce_loss, 'item') else float(bce_loss),
+                    }
+                    if args.head_sim_loss:
+                        log_dict["train/head_sim_loss"] = head_sim_loss_val.item() if hasattr(head_sim_loss_val, 'item') else float(head_sim_loss_val)
+                    wandb.log(log_dict, step=grad_steps)
                     
                 print(f"Epoch {epoch+1}/{args.num_epochs} | "
                       f"Step {step+1}/{len(train_dataloader)} | "
-                      f"Loss: {total_loss / args.gradient_accumulation_steps:.4f}")
+                      f"Loss: {total_loss / args.gradient_accumulation_steps:.4f} | "
+                      f"BCE: {bce_loss.item() if hasattr(bce_loss, 'item') else float(bce_loss):.4f} | "
+                      + (f"HeadSim: {head_sim_loss_val.item() if hasattr(head_sim_loss_val, 'item') else float(head_sim_loss_val):.4f}" if args.head_sim_loss else ""))
                 total_loss = 0
                 grad_steps += 1
 
@@ -395,7 +425,8 @@ if __name__ == "__main__":
     parser.add_argument("--attention_type", type=str, default="gqa", choices=["gqa", "mla", "ngpt", "diff"])
 
     parser.add_argument("--extra_args", type=str, default="{}") # default to empty dict
-
+    parser.add_argument("--head_sim_loss", action='store_true', help="Enable head similarity loss to encourage diverse attention heads.")
+    parser.add_argument("--head_sim_loss_weight", type=float, default=1.0, help="Weight for the head similarity loss.")
 
     args = parser.parse_args()
 

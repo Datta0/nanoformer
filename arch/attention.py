@@ -94,7 +94,7 @@ class Attention(nn.Module):
             self.scale = self.head_dim ** 0.5
             self.normalize_weights()
 
-    def forward(self, X, position_embeddings, mask=None):
+    def forward(self, X, position_embeddings, mask=None, return_attn_scores=False):
 
         bsz, q_len, _ = X.shape
         query, key, value = self.q(X), self.k(X), self.v(X)
@@ -116,11 +116,12 @@ class Attention(nn.Module):
             key = sqk * F.normalize(key, dim=-1)
 
 
-        attn_weights = torch.matmul(query, key.transpose(-2, -1)) * self.scale
+        attn_scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
 
         if self.config.attention_cap:
-            attn_weights = attn_weights.clamp(min=-self.config.attention_cap, max=self.config.attention_cap)
+            attn_scores = attn_scores.clamp(min=-self.config.attention_cap, max=self.config.attention_cap)
 
+        attn_weights = attn_scores
         if mask is not None:
             # Expand mask for attention heads dimension
             mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
@@ -137,6 +138,8 @@ class Attention(nn.Module):
         context = context.transpose(1, 2).contiguous()
         attn_output = self.o(context.view(bsz, q_len, -1))
 
+        if return_attn_scores:
+            return attn_output, attn_weights, attn_scores
         return attn_output, attn_weights
     
     def get_param_count(self,):
@@ -186,7 +189,7 @@ class DiffAttention(nn.Module):
     def lambda_init_fn(self, depth):
         return 0.8 - 0.6 * math.exp(-0.3 * depth)
 
-    def forward(self, X, position_embeddings, mask=None):
+    def forward(self, X, position_embeddings, mask=None, return_attn_scores=False):
         bsz, q_len, _ = X.shape
         query, key, value = self.q(X), self.k(X), self.v(X)
         query_noise, key_noise = self.qn(X), self.kn(X)
@@ -267,7 +270,7 @@ class MultiLatentAttention(nn.Module):
 
         self.dropout = nn.Dropout(config.attention_dropout)
         
-    def forward(self, X, position_embeddings, mask=None):
+    def forward(self, X, position_embeddings, mask=None, return_attn_scores=False):
         bsz, q_len, _ = X.shape
 
         cos, sin = position_embeddings
