@@ -4,6 +4,11 @@ from torch.nn import functional as F
 import os
 import json
 import glob
+try:
+    from safetensors.torch import load_file as safetensors_load_file
+    SAFETENSORS_AVAILABLE = True
+except ImportError:
+    SAFETENSORS_AVAILABLE = False
 
 from .config import Config
 from .layer import Layer, RMSNorm
@@ -202,23 +207,60 @@ class NanoFormerForCausalLM(nn.Module):
             json.dump(self.config.__dict__, f, indent=2)
     
     def load_from_checkpoint(self, checkpoint_path):
+        """
+        Loads the latest checkpoint from a directory. Supports both .bin and .safetensors formats.
+        Returns the step number if found, else None.
+        """
         if not os.path.isdir(checkpoint_path):
             raise OSError(f"Path {checkpoint_path} does not exist")
-        
         # Find all checkpoint directories
         checkpoint_dirs = glob.glob(os.path.join(checkpoint_path, 'checkpoint-*'))
         if not checkpoint_dirs:
             raise FileNotFoundError(f"No checkpoint directories found in {checkpoint_path}")
-        
         # Among the checkpoint directories, find the one with the highest modification time
         latest_checkpoint = max(checkpoint_dirs, key=os.path.getmtime)
         print(f"Loading from the latest checkpoint: {latest_checkpoint}")
-        
-        # Load from the found path
-        state_dict = torch.load(os.path.join(latest_checkpoint, "pytorch_model.bin"))
+        # Try to load .safetensors first, then .bin
+        safetensors_path = os.path.join(latest_checkpoint, "pytorch_model.safetensors")
+        bin_path = os.path.join(latest_checkpoint, "pytorch_model.bin")
+        if os.path.exists(safetensors_path) and SAFETENSORS_AVAILABLE:
+            print(f"Loading weights from {safetensors_path} (safetensors)")
+            state_dict = safetensors_load_file(safetensors_path)
+        elif os.path.exists(bin_path):
+            print(f"Loading weights from {bin_path} (bin)")
+            state_dict = torch.load(bin_path, map_location="cpu")
+        else:
+            raise FileNotFoundError(f"No model weights found in {latest_checkpoint}")
         self.load_state_dict(state_dict)
-
         # if selected folder is checkpoint-x return the value of x
         step = latest_checkpoint.split('/')[-1].split('-')[-1]
         if step.isdigit():
             return int(step)
+        return None
+
+    def load_checkpoint(self, checkpoint_path):
+        """
+        User-friendly method to load a model from a checkpoint directory (either a run directory or a checkpoint subdir).
+        Handles both .bin and .safetensors formats.
+        """
+        if os.path.isdir(checkpoint_path):
+            # If this is a run directory, find the latest checkpoint
+            checkpoint_dirs = [d for d in glob.glob(os.path.join(checkpoint_path, 'checkpoint-*')) if os.path.isdir(d)]
+            if checkpoint_dirs:
+                latest_checkpoint = max(checkpoint_dirs, key=os.path.getmtime)
+            else:
+                latest_checkpoint = checkpoint_path
+        else:
+            raise OSError(f"Checkpoint path {checkpoint_path} does not exist or is not a directory.")
+        safetensors_path = os.path.join(latest_checkpoint, "pytorch_model.safetensors")
+        bin_path = os.path.join(latest_checkpoint, "pytorch_model.bin")
+        if os.path.exists(safetensors_path) and SAFETENSORS_AVAILABLE:
+            print(f"Loading weights from {safetensors_path} (safetensors)")
+            state_dict = safetensors_load_file(safetensors_path)
+        elif os.path.exists(bin_path):
+            print(f"Loading weights from {bin_path} (bin)")
+            state_dict = torch.load(bin_path, map_location="cpu")
+        else:
+            raise FileNotFoundError(f"No model weights found in {latest_checkpoint}")
+        self.load_state_dict(state_dict)
+        print(f"Model loaded from {latest_checkpoint}")

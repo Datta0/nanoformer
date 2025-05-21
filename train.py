@@ -146,6 +146,30 @@ def custom_training_loop(
     if args.compile:
         model = torch.compile(model)
 
+    # Helper for head similarity loss logic
+    def compute_headsim_loss(model, batch, args, apply_headsim):
+        if apply_headsim and args.head_sim_loss_weight > 0:
+            with torch.amp.autocast("cuda:0", enabled=True, dtype=torch.bfloat16):
+                outputs, lm_loss, head_sim_loss_val = model(**batch, return_head_sim_loss=True)
+            loss = lm_loss / args.gradient_accumulation_steps
+            mean_logits = torch.mean(outputs)
+            head_sim_loss_val = head_sim_loss_val * args.head_sim_loss_weight
+            loss = loss + head_sim_loss_val / args.gradient_accumulation_steps
+        elif apply_headsim and args.head_sim_loss_weight == 0:
+            with torch.amp.autocast("cuda:0", enabled=True, dtype=torch.bfloat16):
+                outputs, lm_loss = model(**batch)
+            with torch.no_grad():
+                _, _, head_sim_loss_val = model(**batch, return_head_sim_loss=True)
+            loss = lm_loss / args.gradient_accumulation_steps
+            mean_logits = torch.mean(outputs)
+        else:
+            with torch.amp.autocast("cuda:0", enabled=True, dtype=torch.bfloat16):
+                outputs, lm_loss = model(**batch)
+            head_sim_loss_val = 0.0
+            loss = lm_loss / args.gradient_accumulation_steps
+            mean_logits = torch.mean(outputs)
+        return loss, mean_logits, head_sim_loss_val, lm_loss
+
     # Training loop
     model.train()
     model.set_train()
@@ -154,7 +178,7 @@ def custom_training_loop(
     grad_steps = 0
     step = resume_epoch*n
 
-    for epoch in range(resume_epoch,args.num_epochs):
+    for epoch in range(resume_epoch, args.num_epochs):
         total_loss = 0
         optimizer.zero_grad()
         
@@ -170,28 +194,7 @@ def custom_training_loop(
             
             # Only apply head_sim_loss after warmup if flag is set
             apply_headsim = args.head_sim_loss and (not args.head_sim_loss_after_warmup or step >= int(total_training_steps * args.warmup_ratio))
-            # Always compute head_sim_loss for logging, but only track gradients if weight > 0
-            if apply_headsim and args.head_sim_loss_weight > 0:
-                with torch.amp.autocast("cuda:0", enabled=True, dtype=torch.bfloat16):
-                    outputs, bce_loss, head_sim_loss_val = model(**batch, return_head_sim_loss=True)
-                loss = bce_loss / args.gradient_accumulation_steps
-                mean_logits = torch.mean(outputs)
-                head_sim_loss_val = head_sim_loss_val * args.head_sim_loss_weight
-                loss = loss + head_sim_loss_val / args.gradient_accumulation_steps
-            elif apply_headsim and args.head_sim_loss_weight == 0:
-                with torch.amp.autocast("cuda:0", enabled=True, dtype=torch.bfloat16):
-                    outputs, bce_loss = model(**batch)
-                with torch.no_grad():
-                    _, _, head_sim_loss_val = model(**batch, return_head_sim_loss=True)
-                loss = bce_loss / args.gradient_accumulation_steps
-                mean_logits = torch.mean(outputs)
-            else:
-                with torch.amp.autocast("cuda:0", enabled=True, dtype=torch.bfloat16):
-                    outputs, bce_loss = model(**batch)
-                head_sim_loss_val = 0.0
-                loss = bce_loss / args.gradient_accumulation_steps
-                mean_logits = torch.mean(outputs)
-
+            loss, mean_logits, head_sim_loss_val, lm_loss = compute_headsim_loss(model, batch, args, apply_headsim)
             # Backward pass
             loss.backward()
             
@@ -216,7 +219,7 @@ def custom_training_loop(
                         "train/epoch": epoch + (step / len(train_dataloader)),
                         "train/global_step": grad_steps,
                         "train/mean_logits": mean_logits,
-                        "train/bce_loss": bce_loss.item() if hasattr(bce_loss, 'item') else float(bce_loss),
+                        "train/lm_loss": lm_loss.item() if hasattr(lm_loss, 'item') else float(lm_loss),
                     }
                     if args.head_sim_loss:
                         log_dict["train/head_sim_loss"] = head_sim_loss_val.item() if hasattr(head_sim_loss_val, 'item') else float(head_sim_loss_val)
@@ -225,7 +228,7 @@ def custom_training_loop(
                 print(f"Epoch {epoch+1}/{args.num_epochs} | "
                       f"Step {step+1}/{len(train_dataloader)} | "
                       f"Loss: {total_loss / args.gradient_accumulation_steps:.4f} | "
-                      f"BCE: {bce_loss.item() if hasattr(bce_loss, 'item') else float(bce_loss):.4f} | "
+                      f"LM: {lm_loss.item() if hasattr(lm_loss, 'item') else float(lm_loss):.4f} | "
                       + (f"HeadSim: {head_sim_loss_val.item() if hasattr(head_sim_loss_val, 'item') else float(head_sim_loss_val):.4f}" if args.head_sim_loss else ""))
                 total_loss = 0
                 grad_steps += 1
@@ -337,7 +340,11 @@ def main(args):
     print(f'Total params: {total_params} aka {total_params/1e6:.2f}M, Trainable params: {trainable_params}')
 
     if args.resume_from_checkpoint:
-        resume_step = model.load_from_checkpoint(f'/home/datta0/models/nanoformer/{args.run_name}')
+        if args.checkpoint_path:
+            print(f"Loading model weights from checkpoint: {args.checkpoint_path}")
+            resume_step = model.load_checkpoint(args.checkpoint_path)
+        else:
+            resume_step = model.load_from_checkpoint(f'/home/datta0/models/nanoformer/{args.run_name}')
     else:
         resume_step = 0
     print(f'Starting from step {resume_step}')
@@ -385,6 +392,7 @@ if __name__ == "__main__":
     parser.add_argument("--compile", action='store_true')
     parser.add_argument("--estimate", action='store_true')
     parser.add_argument("--resume_from_checkpoint",action='store_true')
+    parser.add_argument("--checkpoint_path", type=str, default=None, help="Path to a checkpoint directory to load weights from (supports .bin and .safetensors)")
     parser.add_argument("--eval_steps", type=int, default=2048)
 
 
