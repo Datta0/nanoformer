@@ -36,14 +36,28 @@ class Layer(nn.Module):
             self.mlp_alpha_init_scaling = self.scale
             self.mlp_alpha = torch.nn.Parameter(self.mlp_alpha_init_scaling*torch.ones(self.config.hidden_size))
 
-    def forward(self, X, position_embeddings, mask=None, return_attn_scores=False):
+    def mse_head_sim_loss(self, attn_scores):
+        # attn_scores: (batch, num_heads, seq, seq)
+        n_heads = attn_scores.shape[1]
+        # Flatten batch and seq dims for easier broadcasting
+        heads = attn_scores.permute(1, 0, 2, 3).reshape(n_heads, -1)
+        diffs = heads.unsqueeze(0) - heads.unsqueeze(1)  # (n_heads, n_heads, N)
+        mse = (diffs ** 2).mean(-1)
+        # Only upper triangle, excluding diagonal
+        loss = mse.triu(1).sum() / (n_heads * (n_heads - 1) / 2)
+        return loss
+
+    def forward(self, X, position_embeddings, mask=None, return_attn_scores=False, return_head_sim_loss=False):
         residual = X
 
         if self.config.input_layernorm:
             X = self.input_layernorm(X)
 
-        if return_attn_scores:
+        head_sim_loss = None
+        if return_attn_scores or return_head_sim_loss:
             X, _, attn_scores = self.attention(X, position_embeddings, mask, return_attn_scores=True)
+            if return_head_sim_loss:
+                head_sim_loss = self.mse_head_sim_loss(attn_scores)
         else:
             X, _ = self.attention(X, position_embeddings, mask)
 
@@ -79,8 +93,10 @@ class Layer(nn.Module):
         else:
             residual = residual + X * self.config.residual_multiplier
 
-        if return_attn_scores:
+        if return_attn_scores and not return_head_sim_loss:
             return residual, attn_scores
+        elif return_head_sim_loss:
+            return residual, head_sim_loss
         return residual
     
 

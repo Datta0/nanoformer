@@ -50,8 +50,9 @@ class NanoFormer(nn.Module):
         self.layers = nn.ModuleList([Layer(config, i) for i in range(self.num_layers)])
         self.gradient_checkpointing = gradient_checkpointing
 
-    def forward(self, input_ids, attention_mask=None, position_ids=None, mask=None, return_attn_scores=False, **kwargs):
+    def forward(self, input_ids, attention_mask=None, position_ids=None, mask=None, return_attn_scores=False, return_head_sim_loss=False, **kwargs):
         attn_scores_all = [] if return_attn_scores else None
+        head_sim_losses = [] if return_head_sim_loss else None
         if self.gradient_checkpointing and self.training:
             def create_custom_forward(module):
                 def custom_forward(*inputs):
@@ -66,17 +67,25 @@ class NanoFormer(nn.Module):
                 if return_attn_scores:
                     input_ids, attn_scores = torch.utils.checkpoint.checkpoint(
                         create_custom_forward(layer),
-                        input_ids, position_embeddings, mask, True
+                        input_ids, position_embeddings, mask, True, False
                     )
                     attn_scores_all.append(attn_scores)
+                elif return_head_sim_loss:
+                    input_ids, head_sim_loss = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(layer),
+                        input_ids, position_embeddings, mask, False, True
+                    )
+                    head_sim_losses.append(head_sim_loss)
                 else:
                     input_ids = torch.utils.checkpoint.checkpoint(
                         create_custom_forward(layer),
-                        input_ids, position_embeddings, mask
+                        input_ids, position_embeddings, mask, False, False
                     )
             input_ids = self.norm(input_ids)
             if return_attn_scores:
                 return input_ids, attn_scores_all
+            if return_head_sim_loss:
+                return input_ids, head_sim_losses
             return input_ids
         else:
             input_ids = self.embed_tokens(input_ids)
@@ -85,13 +94,18 @@ class NanoFormer(nn.Module):
             position_embeddings = self.rotary_emb(input_ids, position_ids)
             for layer in self.layers:
                 if return_attn_scores:
-                    input_ids, attn_scores = layer(input_ids, position_embeddings, mask, True)
+                    input_ids, attn_scores = layer(input_ids, position_embeddings, mask, True, False)
                     attn_scores_all.append(attn_scores)
+                elif return_head_sim_loss:
+                    input_ids, head_sim_loss = layer(input_ids, position_embeddings, mask, False, True)
+                    head_sim_losses.append(head_sim_loss)
                 else:
-                    input_ids = layer(input_ids, position_embeddings, mask)
+                    input_ids = layer(input_ids, position_embeddings, mask, False, False)
             input_ids = self.norm(input_ids)
             if return_attn_scores:
                 return input_ids, attn_scores_all
+            if return_head_sim_loss:
+                return input_ids, head_sim_losses
             return input_ids
     
     @torch.no_grad()
@@ -115,12 +129,18 @@ class NanoFormerForCausalLM(nn.Module):
         
         self.tie_word_embeddings = config.tie_word_embeddings
 
-    def forward(self, input_ids, attention_mask, return_loss = True, return_attn_scores=False):
+    def forward(self, input_ids, attention_mask, return_loss = True, return_attn_scores=False, return_head_sim_loss=False):
         if return_attn_scores:
             hidden_states, attn_scores_all = self.model(input_ids, attention_mask, return_attn_scores=True)
+            head_sim_loss = None
+        elif return_head_sim_loss:
+            hidden_states, head_sim_losses = self.model(input_ids, attention_mask, return_head_sim_loss=True)
+            attn_scores_all = None
+            head_sim_loss = sum(head_sim_losses) / len(head_sim_losses) if len(head_sim_losses) > 0 else 0.0
         else:
             hidden_states = self.model(input_ids, attention_mask)
             attn_scores_all = None
+            head_sim_loss = None
         logits = self.lm_head(hidden_states)
         if self.config.logit_cap:
             logits = torch.clamp(logits, -self.config.logit_cap, self.config.logit_cap)
@@ -136,6 +156,8 @@ class NanoFormerForCausalLM(nn.Module):
             )
         if return_attn_scores:
             return logits, loss, attn_scores_all
+        if return_head_sim_loss:
+            return logits, loss, head_sim_loss
         return logits, loss
     
     def gradient_checkpointing_enable(self, value=True):

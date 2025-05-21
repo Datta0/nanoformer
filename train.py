@@ -101,20 +101,6 @@ def create_dataloaders(dataset, tokenizer, batch_size, max_length, num_workers=4
     )
     return train_dataloader, val_dataloader
 
-def mse_head_sim_loss(attn_scores):
-    # attn_scores: (batch, num_heads, seq, seq)
-    # Compute MSE between each pair of heads
-    n_heads = attn_scores.shape[1]
-    loss = 0.0
-    count = 0
-    for i in range(n_heads):
-        for j in range(i+1, n_heads):
-            loss = loss + F.mse_loss(attn_scores[:, i], attn_scores[:, j])
-            count += 1
-    if count > 0:
-        loss = loss / count
-    return loss
-
 def custom_training_loop(
     model,
     train_dataloader,
@@ -182,22 +168,29 @@ def custom_training_loop(
                 continue
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             
-            # Forward pass with bfloat16 autocast
-            with torch.amp.autocast("cuda:0", enabled=True, dtype=torch.bfloat16):
-                if args.head_sim_loss:
-                    outputs, bce_loss, attn_scores_all = model(**batch, return_attn_scores=True)
-                else:
-                    outputs, bce_loss = model(**batch)
-                    attn_scores_all = None
+            # Only apply head_sim_loss after warmup if flag is set
+            apply_headsim = args.head_sim_loss and (not args.head_sim_loss_after_warmup or step >= int(total_training_steps * args.warmup_ratio))
+            # Always compute head_sim_loss for logging, but only track gradients if weight > 0
+            if apply_headsim and args.head_sim_loss_weight > 0:
+                with torch.amp.autocast("cuda:0", enabled=True, dtype=torch.bfloat16):
+                    outputs, bce_loss, head_sim_loss_val = model(**batch, return_head_sim_loss=True)
                 loss = bce_loss / args.gradient_accumulation_steps
                 mean_logits = torch.mean(outputs)
+                head_sim_loss_val = head_sim_loss_val * args.head_sim_loss_weight
+                loss = loss + head_sim_loss_val / args.gradient_accumulation_steps
+            elif apply_headsim and args.head_sim_loss_weight == 0:
+                with torch.amp.autocast("cuda:0", enabled=True, dtype=torch.bfloat16):
+                    outputs, bce_loss = model(**batch)
+                with torch.no_grad():
+                    _, _, head_sim_loss_val = model(**batch, return_head_sim_loss=True)
+                loss = bce_loss / args.gradient_accumulation_steps
+                mean_logits = torch.mean(outputs)
+            else:
+                with torch.amp.autocast("cuda:0", enabled=True, dtype=torch.bfloat16):
+                    outputs, bce_loss = model(**batch)
                 head_sim_loss_val = 0.0
-                if args.head_sim_loss and attn_scores_all is not None:
-                    for attn_scores in attn_scores_all:
-                        if attn_scores is not None:
-                            head_sim_loss_val = head_sim_loss_val + mse_head_sim_loss(attn_scores)
-                    head_sim_loss_val = head_sim_loss_val * args.head_sim_loss_weight
-                    loss = loss + head_sim_loss_val / args.gradient_accumulation_steps
+                loss = bce_loss / args.gradient_accumulation_steps
+                mean_logits = torch.mean(outputs)
 
             # Backward pass
             loss.backward()
@@ -427,6 +420,7 @@ if __name__ == "__main__":
     parser.add_argument("--extra_args", type=str, default="{}") # default to empty dict
     parser.add_argument("--head_sim_loss", action='store_true', help="Enable head similarity loss to encourage diverse attention heads.")
     parser.add_argument("--head_sim_loss_weight", type=float, default=1.0, help="Weight for the head similarity loss.")
+    parser.add_argument('--head_sim_loss_after_warmup', action='store_true', help='Apply head similarity loss only after warmup steps')
 
     args = parser.parse_args()
 
