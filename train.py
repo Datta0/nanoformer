@@ -72,7 +72,7 @@ def create_dataloaders(dataset, tokenizer, batch_size, max_length, num_workers=4
         # Pad each sequence to max_len
         padded_batch = tokenizer.pad(
             {'input_ids': [x['input_ids'] for x in batch],
-             'attention_mask': [x['attention_mask'] for x in batch]},
+            'attention_mask': [x['attention_mask'] for x in batch]},
             padding='max_length',
             max_length=max_len,
             return_tensors='pt'
@@ -191,15 +191,12 @@ def custom_training_loop(
                     grad_steps += 1
                 continue
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
-            
             # Only apply head_sim_loss after warmup if flag is set
             apply_headsim = args.head_sim_loss and (not args.head_sim_loss_after_warmup or step >= int(total_training_steps * args.warmup_ratio))
             loss, mean_logits, head_sim_loss_val, lm_loss = compute_headsim_loss(model, batch, args, apply_headsim)
             # Backward pass
             loss.backward()
-            
             total_loss += loss.item() * args.gradient_accumulation_steps  # Multiply back to get true loss
-            
             # Only update weights after accumulating gradients
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
@@ -208,7 +205,6 @@ def custom_training_loop(
                 optimizer.zero_grad()
                 if args.attention_type=="ngpt":
                     model.normalize_weights()
-                
                 # Logging
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'))
                 if not args.no_wandb:
@@ -224,20 +220,24 @@ def custom_training_loop(
                     if args.head_sim_loss:
                         log_dict["train/head_sim_loss"] = head_sim_loss_val.item() if hasattr(head_sim_loss_val, 'item') else float(head_sim_loss_val)
                     wandb.log(log_dict, step=grad_steps)
-                    
+                # Update tqdm progress bar with all loss components before resetting total_loss
+                postfix_dict = {
+                    "loss": f"{total_loss / args.gradient_accumulation_steps:.4f}",
+                    "LM": f"{lm_loss.item() if hasattr(lm_loss, 'item') else float(lm_loss):.4f}",
+                }
+                if args.head_sim_loss:
+                    postfix_dict["HeadSim"] = f"{head_sim_loss_val.item() if hasattr(head_sim_loss_val, 'item') else float(head_sim_loss_val):.4f}"
+                progress_bar.set_postfix(postfix_dict)
                 print(f"Epoch {epoch+1}/{args.num_epochs} | "
-                      f"Step {step+1}/{len(train_dataloader)} | "
-                      f"Loss: {total_loss / args.gradient_accumulation_steps:.4f} | "
-                      f"LM: {lm_loss.item() if hasattr(lm_loss, 'item') else float(lm_loss):.4f} | "
-                      + (f"HeadSim: {head_sim_loss_val.item() if hasattr(head_sim_loss_val, 'item') else float(head_sim_loss_val):.4f}" if args.head_sim_loss else ""))
+                    f"Step {step+1}/{len(train_dataloader)} | "
+                    f"Loss: {total_loss / args.gradient_accumulation_steps:.4f} | "
+                    f"LM: {lm_loss.item() if hasattr(lm_loss, 'item') else float(lm_loss):.4f} | "
+                    + (f"HeadSim: {head_sim_loss_val.item() if hasattr(head_sim_loss_val, 'item') else float(head_sim_loss_val):.4f}" if args.head_sim_loss else ""))
                 total_loss = 0
                 grad_steps += 1
 
                 # if args.tie_word_embeddings and not torch.allclose(model.lm_head.weight, model.model.embed_tokens.weight):
                 #     print(f'Unequal tied embeddings at step {(epoch,step)}')
-                
-                progress_bar.set_postfix(loss=f"{total_loss / args.gradient_accumulation_steps:.4f}")
-            
             if val_dataloader and (step+1) % args.eval_steps == 0:
                 model.eval()
                 val_progress = tqdm(val_dataloader, desc=f"Validation step {step+1}")
@@ -246,20 +246,17 @@ def custom_training_loop(
                 with torch.no_grad():
                     for batch in val_progress:
                         batch = {k: v.to(device) for k, v in batch.items()}
-                        outputs, loss = model(**batch)
-                        val_loss += loss.item()
-                        val_logit_mean += torch.mean(outputs)
-                
+                        val_outputs, val_loss_val = model(**batch)
+                        val_loss += val_loss_val.item()
+                        val_logit_mean += torch.mean(val_outputs)
                 val_loss /= len(val_dataloader)
                 val_logit_mean /= len(val_dataloader)
-                
                 # Save best model
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     best_model_dir = f"{output_dir}/best_model"
                     os.makedirs(best_model_dir, exist_ok=True)
                     model.save_pretrained(best_model_dir)
-                
                 if not args.no_wandb:
                     # Log validation metrics
                     wandb.log({
@@ -267,23 +264,18 @@ def custom_training_loop(
                         "val/epoch": epoch + 1,
                         "val/logit_mean": val_logit_mean,
                     }, step=grad_steps)
-                
                 model.train()
-        
             # Save checkpoint every save_steps
             if step % args.save_steps == 0:
                 checkpoint_dir = f"{output_dir}/checkpoint-{step}"
                 os.makedirs(checkpoint_dir, exist_ok=True)
-                
                 # Save model
                 model.save_pretrained(checkpoint_dir)
-                
                 # Keep only last 3 checkpoints
                 checkpoints = sorted([
                     d for d in os.listdir(output_dir) 
                     if d.startswith('checkpoint-')
                 ], key=lambda x: int(x.split('-')[1]))
-                
                 if len(checkpoints) > 3:
                     shutil.rmtree(f"{output_dir}/{checkpoints[0]}")
     
