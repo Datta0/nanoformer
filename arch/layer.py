@@ -47,6 +47,38 @@ class Layer(nn.Module):
         loss = mse.triu(1).sum() / (n_heads * (n_heads - 1) / 2)
         return loss
 
+    def jensen_shannon_divergence_loss(self, attn_scores):
+        # attn_scores: (batch, num_heads, seq, seq)
+        attention_weights = F.softmax(attn_scores, dim=-1)
+        B, n_heads, T_q, T_k = attention_weights.shape
+        heads_flat = attention_weights.permute(1, 0, 2, 3).reshape(n_heads, B * T_q, T_k)
+        total_js_div = 0.0
+        num_pairs = 0
+        if n_heads < 2:
+            return torch.tensor(0.0, device=attn_scores.device, dtype=attn_scores.dtype)
+        for i in range(n_heads):
+            for j in range(i + 1, n_heads):
+                p = heads_flat[i] + 1e-8
+                q = heads_flat[j] + 1e-8
+                p = p / p.sum(dim=-1, keepdim=True)
+                q = q / q.sum(dim=-1, keepdim=True)
+                m = 0.5 * (p + q)
+                kl_pm = (p * (p / m).log()).sum(dim=-1)
+                kl_qm = (q * (q / m).log()).sum(dim=-1)
+                jsd = 0.5 * (kl_pm + kl_qm)
+                total_js_div += jsd.mean()
+                num_pairs += 1
+        if num_pairs == 0:
+            return torch.tensor(0.0, device=attn_scores.device, dtype=attn_scores.dtype)
+        avg_js_div = total_js_div / num_pairs
+        return -avg_js_div
+
+    def head_sim_loss(self, attn_scores):
+        if getattr(self.config, 'head_sim_loss_type', 'mse') == 'jsd':
+            return self.jensen_shannon_divergence_loss(attn_scores)
+        else:
+            return self.mse_head_sim_loss(attn_scores)
+
     def forward(self, X, position_embeddings, mask=None, return_attn_scores=False, return_head_sim_loss=False):
         residual = X
 
@@ -57,7 +89,7 @@ class Layer(nn.Module):
         if return_attn_scores or return_head_sim_loss:
             X, _, attn_scores = self.attention(X, position_embeddings, mask, return_attn_scores=True)
             if return_head_sim_loss:
-                head_sim_loss = self.mse_head_sim_loss(attn_scores)
+                head_sim_loss = self.head_sim_loss(attn_scores)
         else:
             X, _ = self.attention(X, position_embeddings, mask)
 

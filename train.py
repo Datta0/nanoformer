@@ -321,7 +321,11 @@ def main(args):
     tokenizer.pad_token = tokenizer.eos_token
 
     args.vocab_size = tokenizer.vocab_size
+    # Remove head_sim_loss_type from args to avoid duplicate keyword error
+    if 'head_sim_loss_type' in args.__dict__:
+        del args.__dict__['head_sim_loss_type']
     extra_args = json.loads(args.extra_args)
+    extra_args['head_sim_loss_type'] = args.head_sim_loss_type if hasattr(args, 'head_sim_loss_type') else 'mse'
     config = Config(**vars(args), **extra_args)
     config.vocab_size = tokenizer.vocab_size
     print(f'Setting vocab size to {tokenizer.vocab_size} from tokenizer')
@@ -421,6 +425,7 @@ if __name__ == "__main__":
     parser.add_argument("--head_sim_loss", action='store_true', help="Enable head similarity loss to encourage diverse attention heads.")
     parser.add_argument("--head_sim_loss_weight", type=float, default=1.0, help="Weight for the head similarity loss.")
     parser.add_argument('--head_sim_loss_after_warmup', action='store_true', help='Apply head similarity loss only after warmup steps')
+    parser.add_argument('--head_sim_loss_type', type=str, default='mse', choices=['mse', 'jsd'], help='Type of head similarity loss: mse or jsd')
 
     args = parser.parse_args()
 

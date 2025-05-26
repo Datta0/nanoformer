@@ -1,4 +1,3 @@
-
 class Config:
     def __init__(self,
         vocab_size,
@@ -94,4 +93,8 @@ class Config:
         self.tie_word_embeddings = tie_word_embeddings
         self.gradient_checkpointing = gradient_checkpointing
 
-        
+        # Set any extra kwargs as attributes if not already present
+        for k, v in kwargs.items():
+            if not hasattr(self, k):
+                setattr(self, k, v)
+
